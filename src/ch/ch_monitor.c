@@ -532,7 +532,6 @@ virCHMonitorAddDisk(virCHMonitor *monitor,
                            NULL,
                            NULL);
 }
-
 static int
 virCHMonitorBuildRngJson(virJSONValue *content, virDomainDef *vmdef)
 {
