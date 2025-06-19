@@ -370,6 +370,10 @@ chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
                                    0, &oldDef)))
         goto cleanup;
 
+    if (virDomainDefSave(vm->newDef ? vm->newDef : vm->def,
+                         driver->xmlopt, cfg->configDir) < 0)
+        goto cleanup;
+
     /* cleanup if there's any stale managedsave dir */
     managed_save_path = chDomainManagedSavePath(driver, vm);
     if (virFileDeleteTree(managed_save_path) < 0) {
