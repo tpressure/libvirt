@@ -3317,34 +3317,34 @@ static int chDomainDetachDevice(virDomainPtr dom, const char *xml)
                                      VIR_DOMAIN_AFFECT_LIVE);
 }
 
-static void chNotifyLoadDomain(virDomainObj *vm, int newVM, void *opaque)
-{
-    virCHDriver *driver = opaque;
+/* static void chNotifyLoadDomain(virDomainObj *vm, int newVM, void *opaque) */
+/* { */
+    /* virCHDriver *driver = opaque; */
 
-    if (newVM) {
-        virObjectEvent *event =
-            virDomainEventLifecycleNewFromObj(vm,
-                                     VIR_DOMAIN_EVENT_DEFINED,
-                                     VIR_DOMAIN_EVENT_DEFINED_ADDED);
-        virObjectEventStateQueue(driver->domainEventState, event);
-    }
-}
+    /* if (newVM) { */
+        /* virObjectEvent *event = */
+            /* virDomainEventLifecycleNewFromObj(vm, */
+                                     /* VIR_DOMAIN_EVENT_DEFINED, */
+                                     /* VIR_DOMAIN_EVENT_DEFINED_ADDED); */
+        /* virObjectEventStateQueue(driver->domainEventState, event); */
+    /* } */
+/* } */
 static int
 chStateReload(void)
 {
-    g_autoptr(virCHDriverConfig) cfg = NULL;
+    /* g_autoptr(virCHDriverConfig) cfg = NULL; */
 
     VIR_WARN("in chStateReload\n");
 
-    if (!ch_driver)
-        return 0;
+    /* if (!ch_driver) */
+        /* return 0; */
 
-    cfg = virCHDriverGetConfig(ch_driver);
-    virDomainObjListLoadAllConfigs(ch_driver->domains,
-                                   cfg->configDir,
-                                   cfg->autostartDir, false,
-                                   ch_driver->xmlopt,
-                                   chNotifyLoadDomain, ch_driver);
+    /* cfg = virCHDriverGetConfig(ch_driver); */
+    /* virDomainObjListLoadAllConfigs(ch_driver->domains, */
+                                   /* cfg->configDir, */
+                                   /* cfg->autostartDir, false, */
+                                   /* ch_driver->xmlopt, */
+                                   /* chNotifyLoadDomain, ch_driver); */
     return 0;
 }
 
@@ -3365,6 +3365,24 @@ chStateStop(void)
 
     /* virDomainDriverAutoShutdown(&ascfg); */
 
+    return 0;
+}
+
+static int
+chStateShutdownPrepare(void)
+{
+    VIR_WARN("in chStateShutdownPrepare\n");
+    /* virThreadPoolStop(qemu_driver->workerPool); */
+    return 0;
+}
+
+static int
+chStateShutdownWait(void)
+{
+    VIR_WARN("in chStateShutdownWait\n");
+    /* virDomainObjListForEach(ch_driver->domains, false, */
+                            /* qemuDomainObjStopWorkerIter, NULL); */
+    /* virThreadPoolDrain(ch_driver->workerPool); */
     return 0;
 }
 
@@ -3452,6 +3470,8 @@ static virStateDriver chStateDriver = {
     .stateCleanup = chStateCleanup,
     .stateReload = chStateReload,
     .stateStop = chStateStop,
+    .stateShutdownPrepare = chStateShutdownPrepare,
+    .stateShutdownWait = chStateShutdownWait,
 };
 
 int chRegister(void)
