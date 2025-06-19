@@ -1479,6 +1479,7 @@ chStateInitialize(bool privileged,
 
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(ch_driver);
     /* Get all the running persistent or transient configs first */
+    VIR_WARN("Loading old configs\n");
     if (virDomainObjListLoadAllConfigs(ch_driver->domains,
                                        cfg->stateDir,
                                        NULL, true,
@@ -1487,12 +1488,12 @@ chStateInitialize(bool privileged,
         goto cleanup;
 
     /* Then inactive persistent configs */
-    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
-                                       cfg->configDir,
-                                       cfg->autostartDir, false,
-                                       ch_driver->xmlopt,
-                                       NULL, NULL) < 0)
-        goto cleanup;
+    /* if (virDomainObjListLoadAllConfigs(ch_driver->domains, */
+                                       /* cfg->configDir, */
+                                       /* cfg->autostartDir, false, */
+                                       /* ch_driver->xmlopt, */
+                                       /* NULL, NULL) < 0) */
+        /* goto cleanup; */
 
     ch_driver->privileged = privileged;
     ret = VIR_DRV_STATE_INIT_COMPLETE;
