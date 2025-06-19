@@ -3334,6 +3334,8 @@ chStateReload(void)
 {
     g_autoptr(virCHDriverConfig) cfg = NULL;
 
+    VIR_WARN("in chStateReload\n");
+
     if (!ch_driver)
         return 0;
 
@@ -3346,9 +3348,10 @@ chStateReload(void)
     return 0;
 }
 
-/* static int */
-/* chStateStop(void) */
-/* { */
+static int
+chStateStop(void)
+{
+    VIR_WARN("in chStateStop\n");
     /* g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(qemu_driver); */
     /* virDomainDriverAutoShutdownConfig ascfg = { */
         /* .uri = cfg->uri, */
@@ -3362,8 +3365,8 @@ chStateReload(void)
 
     /* virDomainDriverAutoShutdown(&ascfg); */
 
-    /* return 0; */
-/* } */
+    return 0;
+}
 
 /* Function Tables */
 static virHypervisorDriver chHypervisorDriver = {
@@ -3448,7 +3451,7 @@ static virStateDriver chStateDriver = {
     .stateInitialize = chStateInitialize,
     .stateCleanup = chStateCleanup,
     .stateReload = chStateReload,
-    /* .stateStop = chStateStop, */
+    .stateStop = chStateStop,
 };
 
 int chRegister(void)
