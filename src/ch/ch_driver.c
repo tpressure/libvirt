@@ -1491,7 +1491,7 @@ chStateInitialize(bool privileged,
                                        cfg->autostartDir, false,
                                        ch_driver->xmlopt,
                                        NULL, NULL) < 0)
-        goto error;
+        goto cleanup;
 
     ch_driver->privileged = privileged;
     ret = VIR_DRV_STATE_INIT_COMPLETE;
