@@ -348,6 +348,7 @@ chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
     virDomainPtr dom = NULL;
     virObjectEvent *event = NULL;
     g_autofree char *managed_save_path = NULL;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     unsigned int parse_flags = VIR_DOMAIN_DEF_PARSE_INACTIVE;
 
     virCheckFlags(VIR_DOMAIN_DEFINE_VALIDATE, NULL);
