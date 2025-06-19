@@ -1477,6 +1477,7 @@ chStateInitialize(bool privileged,
 
     ch_driver->chCaps = virCHCapsInitCHVersionCaps(ch_driver->version);
 
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     /* Get all the running persistent or transient configs first */
     if (virDomainObjListLoadAllConfigs(ch_driver->domains,
                                        cfg->stateDir,
