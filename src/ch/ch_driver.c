@@ -1477,6 +1477,22 @@ chStateInitialize(bool privileged,
 
     ch_driver->chCaps = virCHCapsInitCHVersionCaps(ch_driver->version);
 
+    /* Get all the running persistent or transient configs first */
+    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                       cfg->stateDir,
+                                       NULL, true,
+                                       ch_driver->xmlopt,
+                                       NULL, NULL) < 0)
+        goto cleanup;
+
+    /* Then inactive persistent configs */
+    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                       cfg->configDir,
+                                       cfg->autostartDir, false,
+                                       ch_driver->xmlopt,
+                                       NULL, NULL) < 0)
+        goto error;
+
     ch_driver->privileged = privileged;
     ret = VIR_DRV_STATE_INIT_COMPLETE;
 
