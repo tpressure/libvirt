@@ -3317,6 +3317,54 @@ static int chDomainDetachDevice(virDomainPtr dom, const char *xml)
                                      VIR_DOMAIN_AFFECT_LIVE);
 }
 
+static void chNotifyLoadDomain(virDomainObj *vm, int newVM, void *opaque)
+{
+    virCHDriver *driver = opaque;
+
+    if (newVM) {
+        virObjectEvent *event =
+            virDomainEventLifecycleNewFromObj(vm,
+                                     VIR_DOMAIN_EVENT_DEFINED,
+                                     VIR_DOMAIN_EVENT_DEFINED_ADDED);
+        virObjectEventStateQueue(driver->domainEventState, event);
+    }
+}
+static int
+chStateReload(void)
+{
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+
+    if (!ch_driver)
+        return 0;
+
+    cfg = virCHDriverGetConfig(ch_driver);
+    virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                   cfg->configDir,
+                                   cfg->autostartDir, false,
+                                   ch_driver->xmlopt,
+                                   chNotifyLoadDomain, ch_driver);
+    return 0;
+}
+
+/* static int */
+/* chStateStop(void) */
+/* { */
+    /* g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(qemu_driver); */
+    /* virDomainDriverAutoShutdownConfig ascfg = { */
+        /* .uri = cfg->uri, */
+        /* .trySave = cfg->autoShutdownTrySave, */
+        /* .tryShutdown = cfg->autoShutdownTryShutdown, */
+        /* .poweroff = cfg->autoShutdownPoweroff, */
+        /* .waitShutdownSecs = cfg->autoShutdownWait, */
+        /* .saveBypassCache = cfg->autoSaveBypassCache, */
+        /* .autoRestore = cfg->autoShutdownRestore, */
+    /* }; */
+
+    /* virDomainDriverAutoShutdown(&ascfg); */
+
+    /* return 0; */
+/* } */
+
 /* Function Tables */
 static virHypervisorDriver chHypervisorDriver = {
     .name = "CH",
@@ -3399,6 +3447,8 @@ static virStateDriver chStateDriver = {
     .name = "cloud-hypervisor",
     .stateInitialize = chStateInitialize,
     .stateCleanup = chStateCleanup,
+    .stateReload = chStateReload,
+    /* .stateStop = chStateStop, */
 };
 
 int chRegister(void)
