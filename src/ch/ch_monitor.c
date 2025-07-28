@@ -43,6 +43,8 @@
 
 #define VIR_FROM_THIS VIR_FROM_CH
 
+#define VIRTIO_BLK_ID_BYTES 20
+
 VIR_LOG_INIT("ch.ch_monitor");
 
 static virClass *virCHMonitorClass;
@@ -462,6 +464,14 @@ virCHMonitorBuildDiskJson(virDomainDiskDef *diskdef)
         }
         if (virJSONValueObjectAppendString(disk, "path", diskdef->src->path) < 0)
             return NULL;
+
+        if (diskdef->serial) {
+            char serial_buf[VIRTIO_BLK_ID_BYTES + 1];
+            memset(serial_buf, 0, VIRTIO_BLK_ID_BYTES + 1);
+            strncpy(&serial_buf[0], diskdef->serial, VIRTIO_BLK_ID_BYTES);
+            if (virJSONValueObjectAppendString(disk, "serial", serial_buf) < 0)
+                return NULL;
+        }
         if (diskdef->src->readonly) {
             if (virJSONValueObjectAppendBoolean(disk, "readonly", true) < 0)
                 return NULL;
