@@ -356,6 +356,27 @@ virCHMonitorBuildMemoryZonesJson(virJSONValue *content, virDomainDef *def)
                 return -1;
         }
 
+        if (def->mem.nhugepages) {
+            VIR_WARN("Found %ld hugepage definitions", def->mem.nhugepages);
+            for (unsigned j=0; j<def->mem.nhugepages; ++j) {
+                VIR_WARN("  %d: size=%lld", j, def->mem.hugepages[j].size);
+                if (def->mem.hugepages[j].nodemask) {
+                    g_autofree char *nodeset2 = virBitmapFormat(def->mem.hugepages[j].nodemask);
+                    VIR_WARN("  %d: nodeset='%s'", j, nodeset2);
+                    if (virBitmapIsBitSet(def->mem.hugepages[j].nodemask, i)) {
+                        VIR_WARN("    hugepages requested for node %d", i);
+                        virJSONValueObjectAppendBoolean(zone, "hugepages", true);
+                        virJSONValueObjectAppendNumberInt(zone, "hugepage_size", def->mem.hugepages[j].size * 1024);
+                        break;
+                    }
+                } else {
+                    VIR_WARN("XXX nodemask is null");
+                }
+            }
+        } else {
+            VIR_WARN("no hugepage mapping requested");
+        }
+
         if (virJSONValueArrayAppend(zones, &zone) < 0)
             return -1;
     }
@@ -714,6 +735,22 @@ virCHMonitorBuildVMJson(virCHDriver *driver, virDomainDef *vmdef,
         VIR_WARN("Failed building NUMA json");
         return -1;
     }
+
+
+    /* if (vmdef->mem.nhugepages) { */
+        /* for (unsigned i=0; i<vmdef->mem.nhugepages; ++i) { */
+            /* VIR_WARN("XXX hugepage_size: %lld", vmdef->mem.hugepages[i].size); */
+            /* if (vmdef->mem.hugepages[i].nodemask) { */
+                /* g_autofree char *nodeset = virBitmapFormat(vmdef->mem.hugepages[i].nodemask); */
+
+                /* VIR_WARN("    nodeset='%s'", nodeset); */
+            /* } else { */
+                /* VIR_WARN("XXX nodemask is null"); */
+            /* } */
+        /* } */
+    /* } else { */
+        /* VIR_WARN("no memory definition"); */
+    /* } */
 
     if (virBitmapIsBitSet(driver->chCaps, CH_KERNEL_API_DEPRCATED)) {
         if (virCHMonitorBuildPayloadJson(content, vmdef) < 0)
