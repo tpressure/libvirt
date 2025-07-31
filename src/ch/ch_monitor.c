@@ -306,6 +306,19 @@ virCHMonitorBuildKernelRelatedJson(virJSONValue *content, virDomainDef *vmdef)
     return 0;
 }
 
+static int virCHMonitorBuildHugePageJson(virJSONValue *content, size_t size, bool prefault)
+{
+    VIR_WARN("hugepage: size=%ld", size);
+
+    virJSONValueObjectAppendBoolean(content, "hugepages", true);
+    virJSONValueObjectAppendNumberInt(content, "hugepage_size", size);
+
+    if (prefault) {
+        VIR_WARN("hugepage: prefaulting has been requested");
+        virJSONValueObjectAppendBoolean(content, "prefault", true);
+    }
+}
+
 /**
  * CHV example NUMA cmdline:
  *--numa guest_numa_id=0,cpus=[0,1],memory_zones=[fast_mem] \
@@ -352,6 +365,24 @@ virCHMonitorBuildMemoryZonesJson(virJSONValue *content, virDomainDef *def)
                 return -1;
         }
 
+        if (def->mem.nhugepages) {
+            VIR_WARN("hugepage: found %ld definitions", def->mem.nhugepages);
+            for (unsigned j=0; j<def->mem.nhugepages; ++j) {
+                size_t size = def->mem.hugepages[j].size * 1024;
+                bool prefault = def->mem.allocation == VIR_DOMAIN_MEMORY_ALLOCATION_IMMEDIATE;
+
+                if (def->mem.hugepages[j].nodemask) {
+                    if (virBitmapIsBitSet(def->mem.hugepages[j].nodemask, i)) {
+                        virCHMonitorBuildHugePageJson(zone, size, prefault);
+                        break;
+                    }
+                } else {
+                    VIR_WARN("hugepage: applying default definition");
+                    virCHMonitorBuildHugePageJson(zone, size, prefault);
+                }
+            }
+        }
+
         if (virJSONValueArrayAppend(zones, &zone) < 0)
             return -1;
     }
@@ -383,6 +414,11 @@ virCHMonitorBuildMemoryJson(virJSONValue *content, virDomainDef *vmdef)
         } else {
             if (virJSONValueObjectAppendNumberUlong(memory, "size", total_memory) < 0)
                 return -1;
+            if (vmdef->mem.nhugepages) {
+                size_t size = vmdef->mem.hugepages[0].size * 1024;
+                bool prefault = vmdef->mem.allocation == VIR_DOMAIN_MEMORY_ALLOCATION_IMMEDIATE;
+                virCHMonitorBuildHugePageJson(memory, size, prefault);
+            }
         }
 
         if (virJSONValueObjectAppend(content, "memory", &memory) < 0)
