@@ -3042,7 +3042,8 @@ chDomainMigratePerform3(virDomainPtr dom,
         uri = uri_out;
     }
 
-    if (virCHMonitorMigrationSend(priv->monitor, uri) < 0) {
+    /* if (virCHMonitorMigrationSend(priv->monitor, uri) < 0) { */
+    if (1) {
         VIR_WARN("Migration send failed.");
         dconn->driver->domainMigrateFinish3(dconn, vm->def->name, NULL, 0, NULL, NULL, NULL, uri, flags, 0);
         rc = -1;
