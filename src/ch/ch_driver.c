@@ -3158,6 +3158,7 @@ chDomainMigrateFinish3(virConnectPtr dconn,
     VIR_WARN("chDomainMigrateFinish3 %p %s %s %d %p %p %lu %d",
               dconn, dname, cookiein, cookieinlen, cookieout, cookieoutlen, flags, cancelled);
 
+    VIR_WARN("XXX: %d", __LINE__);
     vm = virDomainObjListFindByName(driver->domains, dname);
     if (!vm) {
         virReportError(VIR_ERR_NO_DOMAIN,
@@ -3165,16 +3166,19 @@ chDomainMigrateFinish3(virConnectPtr dconn,
         return NULL;
     }
 
+    VIR_WARN("XXX: %d", __LINE__);
     if (virDomainMigrateFinish3EnsureACL(dconn, vm->def) < 0) {
         virDomainObjEndAPI(&vm);
         return NULL;
     }
+    VIR_WARN("XXX: %d", __LINE__);
     if (!(dom = virGetDomain(dconn, vm->def->name, vm->def->uuid, vm->def->id))) {
         virDomainObjEndAPI(&vm);
         VIR_WARN("virGetDomain failed.");
         return NULL;
 
     }
+    VIR_WARN("XXX: %d", __LINE__);
     if (virCHProcessUpdateInfo(vm) < 0) {
         VIR_WARN("Could not update console info. Consider that non-fatal.");
     }
@@ -3182,12 +3186,14 @@ chDomainMigrateFinish3(virConnectPtr dconn,
     priv = vm->privateData;
     virThreadJoin(priv->migrationDstReceiveThr);
 
+    VIR_WARN("XXX: %d", __LINE__);
     VIR_FREE(priv->migrationDstReceiveThr);
 
     if (virPortAllocatorRelease(priv->args->port) < 0) {
         VIR_WARN("Could not release migration port");
     }
 
+    VIR_WARN("XXX: %d", __LINE__);
     virMutexDestroy(&priv->args->mutex);
 
     if (virCondDestroy(&priv->args->cond) < 0) {
@@ -3195,7 +3201,9 @@ chDomainMigrateFinish3(virConnectPtr dconn,
     }
 
 
+    VIR_WARN("XXX: %d", __LINE__);
     if (priv->args->success == true) {
+        VIR_WARN("XXX: %d", __LINE__);
         virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_MIGRATED);
 
         if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
@@ -3211,6 +3219,7 @@ chDomainMigrateFinish3(virConnectPtr dconn,
                 goto error;
         }
     } else {
+        VIR_WARN("XXX: %d", __LINE__);
         // FIXME: we currently have to shutdown the VMM here
         // because CHV does not release the network file descriptors
         state = virDomainObjGetState(vm, NULL);
@@ -3221,11 +3230,13 @@ chDomainMigrateFinish3(virConnectPtr dconn,
             }
         }
 
+        VIR_WARN("XXX: %d", __LINE__);
         if (virCHProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_DESTROYED) < 0)
             goto error;
 
         virDomainObjRemoveTransientDef(vm);
 
+        VIR_WARN("XXX: %d", __LINE__);
         if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
             goto error;
         }
@@ -3236,6 +3247,7 @@ chDomainMigrateFinish3(virConnectPtr dconn,
         virCHDomainRemoveInactive(driver, vm);
     }
 error:
+    VIR_WARN("XXX: %d", __LINE__);
     VIR_FREE(priv->args);
     virDomainObjEndAPI(&vm);
     return dom;
