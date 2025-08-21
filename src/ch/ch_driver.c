@@ -3184,8 +3184,10 @@ chDomainMigrateFinish3(virConnectPtr dconn,
             VIR_WARN("Could not update console info. Consider that non-fatal.");
         }
     }
+    VIR_WARN("XXX: %d", __LINE__);
 
     priv = vm->privateData;
+    VIR_WARN("XXX: %d", __LINE__);
     virThreadJoin(priv->migrationDstReceiveThr);
 
     VIR_WARN("XXX: %d", __LINE__);
