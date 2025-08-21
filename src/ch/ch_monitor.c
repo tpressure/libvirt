@@ -1840,7 +1840,7 @@ int virCHMonitorMigrationReceive(virCHMonitor *mon,
     }
 
     VIR_WARN("wait for response");
-    if (chSocketProcessHttpResponse(mon_sockfd, false) < 0) {
+    if (chSocketProcessHttpResponse(mon_sockfd, true) < 0) {
         virReportSystemError(errno, "%s",
                              _("Failed to recv http response from CHV"));
         rc = -1;
