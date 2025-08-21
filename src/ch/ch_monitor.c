@@ -1846,11 +1846,13 @@ int virCHMonitorMigrationReceive(virCHMonitor *mon,
         rc = -1;
         goto out_close_fds;
     }
+    VIR_WARN("got response");
 
 out_close_fds:
     if (tapfds)
         chCloseFDs(tapfds, ntapfds);
 out:
+    VIR_WARN("XXX failure");
     return rc;
 }
 
