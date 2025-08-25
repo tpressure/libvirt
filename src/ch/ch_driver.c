@@ -3045,7 +3045,7 @@ chDomainMigratePerform3(virDomainPtr dom,
     /* if (virCHMonitorMigrationSend(priv->monitor, uri) < 0) { */
     if (1) {
         VIR_WARN("Migration send failed.");
-        dconn->driver->domainMigrateFinish3(dconn, vm->def->name, NULL, 0, NULL, NULL, NULL, uri, flags, 0);
+        dconn->driver->domainMigrateFinish3(dconn, vm->def->name, NULL, 0, NULL, NULL, NULL, uri, flags, 1);
         rc = -1;
         goto cleanup;
     }
@@ -3227,13 +3227,13 @@ chDomainMigrateFinish3(virConnectPtr dconn,
         VIR_WARN("XXX: %d", __LINE__);
         // FIXME: we currently have to shutdown the VMM here
         // because CHV does not release the network file descriptors
-        state = virDomainObjGetState(vm, NULL);
-        if (state == VIR_DOMAIN_RUNNING || state == VIR_DOMAIN_PAUSED) {
-            if (virCHMonitorShutdownVMM(priv->monitor) < 0) {
-                virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
-                        _("failed to shutdown VMM"));
-            }
-        }
+        /* state = virDomainObjGetState(vm, NULL); */
+        /* if (state == VIR_DOMAIN_RUNNING || state == VIR_DOMAIN_PAUSED) { */
+            /* if (virCHMonitorShutdownVMM(priv->monitor) < 0) { */
+                /* virReportError(VIR_ERR_INTERNAL_ERROR, "%s", */
+                        /* _("failed to shutdown VMM")); */
+            /* } */
+        /* } */
 
         VIR_WARN("XXX: %d", __LINE__);
         if (virCHProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_DESTROYED) < 0)
