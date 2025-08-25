@@ -3236,7 +3236,7 @@ chDomainMigrateFinish3(virConnectPtr dconn,
         /* } */
 
         VIR_WARN("XXX: %d", __LINE__);
-        if (virCHProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_DESTROYED, cancelled == 1) < 0)
+        if (virCHProcessKill(driver, vm, VIR_DOMAIN_SHUTOFF_DESTROYED) < 0)
             goto error;
 
         virDomainObjRemoveTransientDef(vm);

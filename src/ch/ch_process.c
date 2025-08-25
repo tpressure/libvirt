@@ -1245,10 +1245,9 @@ virCHProcessStart(virCHDriver *driver,
 }
 
 int
-virCHProcessStop(virCHDriver *driver,
+virCHProcessKill(virCHDriver *driver,
                  virDomainObj *vm,
-                 virDomainShutoffReason reason,
-                 bool kill)
+                 virDomainShutoffReason reason)
 {
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret;
@@ -1265,11 +1264,81 @@ virCHProcessStop(virCHDriver *driver,
     virErrorPreserveLast(&orig_err);
 
     if (priv->monitor) {
-        if (kill) {
-            virProcessKill(vm->pid, SIGKILL);
-        } else {
-            virProcessAbort(vm->pid);
+        virProcessKill(vm->pid, SIGKILL);
+        g_clear_pointer(&priv->monitor, virCHMonitorClose);
+    }
+
+    // Release the inhibitor, which leads to virtchd shutting down after 120
+    // secs if no running domain is remaining.
+    virInhibitorRelease(driver->inhibitor);
+
+    /* de-activate netdevs after stopping vm */
+    ignore_value(virDomainInterfaceStopDevices(vm->def));
+
+    for (i = 0; i < def->nnets; i++) {
+        virDomainNetDef *net = def->nets[i];
+        virDomainInterfaceDeleteDevice(def, net, false, cfg->stateDir);
+    }
+
+ retry:
+    if ((ret = virDomainCgroupRemoveCgroup(vm,
+                                           priv->cgroup,
+                                           priv->machineName)) < 0) {
+        if (ret == -EBUSY && (retries++ < 5)) {
+            g_usleep(200*1000);
+            goto retry;
         }
+        VIR_WARN("Failed to remove cgroup for %s",
+                 vm->def->name);
+    }
+
+    vm->pid = 0;
+    vm->def->id = -1;
+    g_clear_pointer(&priv->machineName, g_free);
+
+    if (priv->pidfile) {
+        if (unlink(priv->pidfile) < 0 &&
+            errno != ENOENT)
+            VIR_WARN("Failed to remove PID file for %s: %s",
+                     vm->def->name, g_strerror(errno));
+
+        g_clear_pointer(&priv->pidfile, g_free);
+    }
+
+    virDomainObjSetState(vm, VIR_DOMAIN_SHUTOFF, reason);
+
+    virDomainObjRemoveTransientDef(vm);
+
+    ignore_value(virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm));
+
+    virHostdevReAttachDomainDevices(driver->hostdevMgr, CH_DRIVER_NAME, def,
+                                    hostdev_flags);
+
+    virErrorRestore(&orig_err);
+    return 0;
+}
+
+int
+virCHProcessStop(virCHDriver *driver,
+                 virDomainObj *vm,
+                 virDomainShutoffReason reason)
+{
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
+    int ret;
+    int retries = 0;
+    unsigned int hostdev_flags = VIR_HOSTDEV_SP_PCI;
+    virCHDomainObjPrivate *priv = vm->privateData;
+    virDomainDef *def = vm->def;
+    virErrorPtr orig_err = NULL;
+    size_t i;
+
+    VIR_DEBUG("Stopping VM name=%s pid=%d reason=%d",
+              vm->def->name, (int)vm->pid, (int)reason);
+
+    virErrorPreserveLast(&orig_err);
+
+    if (priv->monitor) {
+        virProcessAbort(vm->pid);
         g_clear_pointer(&priv->monitor, virCHMonitorClose);
     }
 
