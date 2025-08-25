@@ -1247,7 +1247,8 @@ virCHProcessStart(virCHDriver *driver,
 int
 virCHProcessStop(virCHDriver *driver,
                  virDomainObj *vm,
-                 virDomainShutoffReason reason)
+                 virDomainShutoffReason reason,
+                 bool kill)
 {
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret;
@@ -1264,7 +1265,11 @@ virCHProcessStop(virCHDriver *driver,
     virErrorPreserveLast(&orig_err);
 
     if (priv->monitor) {
-        virProcessAbort(vm->pid);
+        if (kill) {
+            virProcessKill(vm->pid, SIGKILL);
+        } else {
+            virProcessAbort(vm->pid);
+        }
         g_clear_pointer(&priv->monitor, virCHMonitorClose);
     }
 
