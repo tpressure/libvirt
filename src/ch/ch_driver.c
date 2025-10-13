@@ -4198,9 +4198,68 @@ chDomainBlockResize(virDomainPtr dom,
                       unsigned long long size,
                       unsigned int flags)
 {
-    VIR_WARN("chDomainBlockResize: path:%s size:%lld, flags:%x", path, size, flags);
-    return -1;
+    virDomainObj *vm;
+    qemuDomainObjPrivate *priv;
+    int ret = -1;
+    g_autofree char *device = NULL;
+    const char *nodename = NULL;
+    virDomainDiskDef *disk = NULL;
+    virDomainDiskDef *persistDisk = NULL;
 
+    VIR_WARN("chDomainBlockResize: path:%s size:%lld, flags:%x", path, size, flags);
+
+    virCheckFlags(VIR_DOMAIN_BLOCK_RESIZE_BYTES |
+                  VIR_DOMAIN_BLOCK_RESIZE_CAPACITY, -1);
+
+    if ((flags & VIR_DOMAIN_BLOCK_RESIZE_BYTES) == 0) {
+        if (size > ULLONG_MAX / 1024) {
+            virReportError(VIR_ERR_OVERFLOW,
+                           _("size must be less than %1$llu"),
+                           ULLONG_MAX / 1024);
+            return -1;
+        }
+        size *= 1024;
+    }
+
+    if (!(vm = virCHDomainObjFromDomain(dom)))
+        goto cleanup;
+
+    priv = vm->privateData;
+
+    if (virDomainBlockResizeEnsureACL(dom->conn, vm->def) < 0)
+        goto cleanup;
+
+    if (virDomainObjBeginJob(vm, VIR_JOB_MODIFY) < 0)
+        goto cleanup;
+
+    if (virDomainObjCheckActive(vm) < 0)
+        goto endjob;
+
+    if (!(disk = virDomainDiskByName(vm->def, path, false))) {
+        virReportError(VIR_ERR_INVALID_ARG,
+                       _("disk '%1$s' was not found in the domain config"), path);
+        goto endjob;
+    }
+
+    if (virStorageSourceIsEmpty(disk->src) || disk->src->readonly) {
+        virReportError(VIR_ERR_OPERATION_UNSUPPORTED,
+                       _("can't resize empty or readonly disk '%1$s'"),
+                       disk->dst);
+        goto endjob;
+    }
+
+    if (virStorageSourceGetActualType(disk->src) == VIR_STORAGE_TYPE_VHOST_USER) {
+        virReportError(VIR_ERR_OPERATION_UNSUPPORTED, "%s",
+                       _("block resize is not supported for vhostuser disk"));
+        goto endjob;
+    }
+
+ endjob:
+    virDomainObjEndJob(vm);
+
+ cleanup:
+    virDomainObjEndAPI(&vm);
+    return ret;
 }
 
 /* Function Tables */
