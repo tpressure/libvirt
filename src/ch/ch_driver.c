@@ -4192,6 +4192,17 @@ chConnectGetDomainCapabilities(virConnectPtr conn,
     return virDomainCapsFormat(domCaps);
 }
 
+static int
+chDomainBlockResize(virDomainPtr dom,
+                      const char *path,
+                      unsigned long long size,
+                      unsigned int flags)
+{
+    VIR_WARN("chDomainBlockResize: path:%s size:%lld, flags:%x", path, size, flags);
+    return -1;
+
+}
+
 /* Function Tables */
 static virHypervisorDriver chHypervisorDriver = {
     .name = "CH",
@@ -4271,6 +4282,7 @@ static virHypervisorDriver chHypervisorDriver = {
     .domainDetachDevice = chDomainDetachDevice, /* 11.4.0 */
     .domainDetachDeviceFlags = chDomainDetachDeviceFlags, /* 11.4.0 */
     .connectGetDomainCapabilities = chConnectGetDomainCapabilities, /* 11.4.0 */
+    .domainBlockResize = chDomainBlockResize, /* 0.9.8 */
 };
 
 static virConnectDriver chConnectDriver = {
