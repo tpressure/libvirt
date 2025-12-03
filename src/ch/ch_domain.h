@@ -47,6 +47,7 @@ struct _virCHDomainObjPrivate {
      * events.
      */
     int shutdown_done;
+    char* migration_thread_name_internal;
 };
 
 struct _chMigrationDstArgs {

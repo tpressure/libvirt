@@ -47,6 +47,7 @@
 #include "virfile.h"
 #include "virstring.h"
 #include "virtime.h"
+#include "virthreadjob.h"
 #include "virtypedparam.h"
 #include "virutil.h"
 #include "viruuid.h"
@@ -2742,6 +2743,7 @@ chDoMigrateDstReceive(void *opaque)
     chMigrationDstArgs *args = opaque;
     virCHDomainObjPrivate *priv = args->priv;
     g_autofree char* rcv_uri = NULL;
+    priv->migration_thread_name_internal = virThreadJobGet();
 
     DBG("Migration thread executing");
     if (!priv->monitor) {
@@ -3381,6 +3383,7 @@ chDomainMigrateFinish3(virConnectPtr dconn,
     } else {
         DBG("Migration was unsuccessful, cancel thread");
         virThreadCancel(priv->migrationDstReceiveThr);
+        g_free(priv->migration_thread_name_internal);
     }
 
     virThreadJoin(priv->migrationDstReceiveThr);
