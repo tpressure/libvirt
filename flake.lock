@@ -3,11 +3,11 @@
     "cloud-hypervisor-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1767691830,
-        "narHash": "sha256-W815prxSJim1+z2fJ34tM7n2uXHZJfc/kdd50JpxeVY=",
+        "lastModified": 1767714447,
+        "narHash": "sha256-d7McdQ8gp72PoeXv4TH7SNRsebB2Y1J3MyDOc6dqOew=",
         "owner": "cyberus-technology",
         "repo": "cloud-hypervisor",
-        "rev": "451cfb7cd7999646b35faaa3666c90da8d758df6",
+        "rev": "daaea602a21b95bbfc3c1e277e1b7145377bc561",
         "type": "github"
       },
       "original": {
@@ -139,26 +139,27 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1767692484,
-        "narHash": "sha256-iNe6UOmsA0mTn7eOqibIMLMdZTZBJ4LteJDYiEK4uCw=",
-        "owner": "cyberus-technology",
+        "lastModified": 1767778688,
+        "narHash": "sha256-I5foLKOUeE4ihFrDMJwSCUhn4HEWYZOUEwbMDImoD1E=",
+        "owner": "scholzp",
         "repo": "libvirt-tests",
-        "rev": "c14b22d916d0cb15dde9c35f223f40bb65bdd9ed",
+        "rev": "d955b3cff1e54e9fa813895b5a6beaad165e723b",
         "type": "github"
       },
       "original": {
-        "owner": "cyberus-technology",
+        "owner": "scholzp",
+        "ref": "bdf_tests",
         "repo": "libvirt-tests",
         "type": "github"
       }
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1767480499,
-        "narHash": "sha256-8IQQUorUGiSmFaPnLSo2+T+rjHtiNWc+OAzeHck7N48=",
+        "lastModified": 1767634882,
+        "narHash": "sha256-2GffSfQxe3sedHzK+sTKlYo/NTIAGzbFCIsNMUPAAnk=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "30a3c519afcf3f99e2c6df3b359aec5692054d92",
+        "rev": "3c9db02515ef1d9b6b709fc60ba9a540957f661c",
         "type": "github"
       },
       "original": {

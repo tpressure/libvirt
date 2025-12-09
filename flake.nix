@@ -6,7 +6,7 @@
     cloud-hypervisor-src.flake = false;
     keycodemapdb.url = "git+https://gitlab.com/keycodemap/keycodemapdb.git";
     keycodemapdb.flake = false;
-    libvirt-tests.url = "github:cyberus-technology/libvirt-tests";
+    libvirt-tests.url = "github:scholzp/libvirt-tests?ref=bdf_tests";
     libvirt-tests.inputs.cloud-hypervisor-src.follows = "cloud-hypervisor-src";
     libvirt-tests.inputs.nixpkgs.follows = "nixpkgs";
     # We follow the latest stable release of nixpkgs
