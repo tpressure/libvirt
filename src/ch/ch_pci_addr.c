@@ -22,9 +22,6 @@
 #define VIR_FROM_THIS VIR_FROM_CH
 VIR_LOG_INIT("ch.ch_pci_addr");
 
-const char* DEFAULT_RNG_SOURCE = "/dev/urandom";
-const char* DEFAULT_RNG_ALIAS = "implicit-rng-device";
-
 // Helper to collect `virDomainDeviceInfo`s that need to allocate a completely new PCI device ID. 
 typedef struct _dynamicAddressQueue {
     // Current length of the queue
@@ -80,59 +77,6 @@ static void free_queue(dynamicAddressQueue **queue) {
     g_free((*queue)->devInfos);
     g_free(*queue);
     *queue = NULL;
-}
-
-/**
- * Initializes the Array of virDomainRNGDef with a default device.
- * CHV creates a default RNG device if none is present, so we do the same add one to the configuration.
- * The default as of writing this code is as follows:
- *  - random with path /dev/urandom
- *  - no iommu
- *  - no bdf, but we assign one as we want libvirt and CHV to be in sync
- */
-static int chAddDefaultVirtioRngDevice(virDomainRNGDef ***deviceDefs) {
-    int ret = -1;
-    char* rng_device_alias = g_strdup(DEFAULT_RNG_ALIAS); 
-    char* rng_source_file = g_strdup(DEFAULT_RNG_SOURCE);
-    virDomainDeviceInfo implicit_rng_device_info = {
-        .alias = NULL,
-        .addr.pci = {0},
-        .type = VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI,
-        .pciConnectFlags = VIR_PCI_CONNECT_TYPE_PCI_DEVICE | VIR_PCI_CONNECT_HOTPLUGGABLE,
-    };
-    virDomainRNGDef* implicit_rng_device = g_new0 (virDomainRNGDef, 1);
-
-    if (!implicit_rng_device) {
-        virReportError(VIR_ERR_INTERNAL_ERROR,
-            _("Failed to allocate memory for implicit RNG device!"));
-        goto cleanup;
-    }
-
-    // Create the default RNG device 
-    implicit_rng_device->model = VIR_DOMAIN_RNG_MODEL_VIRTIO;
-    implicit_rng_device->backend = VIR_DOMAIN_RNG_BACKEND_RANDOM;
-    implicit_rng_device->info = implicit_rng_device_info;
-    implicit_rng_device->source.file = g_steal_pointer(&rng_source_file);
-    implicit_rng_device->info.alias = g_steal_pointer(&rng_device_alias);
-    // All well so far, now we add it to the configuration by allocating the list and adding the device to its head
-    *deviceDefs = g_malloc0(sizeof(**deviceDefs));
-    if (!deviceDefs) {
-        virReportError(VIR_ERR_INTERNAL_ERROR,
-            _("Failed to allocate memory for RNG device list when creating implicit RNG device!"));
-        goto cleanup;
-    }
-    (*deviceDefs)[0] = g_steal_pointer(&implicit_rng_device);
-    ret = 0;
-
-    cleanup:
-    if(NULL != rng_source_file)
-        g_free(rng_source_file);
-    if(NULL != rng_device_alias)
-        g_free(rng_device_alias);
-    if(NULL != rng_device_alias)
-        g_free(implicit_rng_device);
-    
-    return ret;
 }
 
 /**
@@ -243,19 +187,16 @@ static int chReserveOrQueueForPciSlotId(virDomainPCIAddressSet *addrSet,
  *
  * Returns: 0 on success, -1 in case of error 
  */
-static int chInitRngVirtioPciDevices(virDomainPCIAddressSet *addrSet, size_t *numDefs, virDomainRNGDef ***deviceDefs, dynamicAddressQueue* queue) {
+static int chInitRngVirtioPciDevices(virDomainPCIAddressSet *addrSet,
+                                     size_t *numDefs,
+                                     virDomainRNGDef ***deviceDefs,
+                                     dynamicAddressQueue* queue)
+{
     size_t idx;
-    // Cloudhypervisor creates an implicit RNG device if non is found in the config, so we do the same.
-    if (!(*numDefs)) {
-        if (0 != chAddDefaultVirtioRngDevice(deviceDefs))
-            virReportError(VIR_ERR_INTERNAL_ERROR,_("Couldn't add implicit RNG device to PCI tree!"));
-        *numDefs = 1;
-        DBG("Added Implicit RNG device to config");
-    }
     // Assign an address to all RNG devices
     for (idx = 0; idx < *numDefs; ++idx) {
         virDomainRNGDef *rng = (*deviceDefs)[idx];
-        if (0 != chReserveOrQueueForPciSlotId(addrSet, &rng->info, queue)) 
+        if (chReserveOrQueueForPciSlotId(addrSet, &rng->info, queue)) 
             return -1;
     }
     return 0;
