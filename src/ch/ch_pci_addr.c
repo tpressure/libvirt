@@ -158,6 +158,14 @@ static int chReserveOrQueueForPciSlotId(virDomainPCIAddressSet *addrSet,
                            devInfo->alias);
             return -1;
         }
+        // We don't support multi function devices currently, so fail if we see a function ID set.
+        if (devInfo->addr.pci.function) {
+            virReportError(VIR_ERR_INTERNAL_ERROR,
+                _("Found non-zero function ID '%d' for device '%s'. CHV does not support multi function devices!"),
+                                            devInfo->addr.pci.function,
+                                            devInfo->alias);
+            return -1;
+        }
         // We don't need to assign a new slot, but must mark the slot as taken
         if (virDomainPCIAddressReserveAddr(addrSet, &devInfo->addr.pci, devInfo->pciConnectFlags, 0)) {
             virReportError(VIR_ERR_INTERNAL_ERROR,
