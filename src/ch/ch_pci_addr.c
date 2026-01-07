@@ -231,12 +231,6 @@ static int chInitNetworkVirtioPciDevices(virDomainPCIAddressSet *addrSet,
     size_t idx;
     for (idx = 0; idx < numDefs; ++idx) {
         virDomainNetDef *net = netDevDefs[idx];
-        if (net->type != VIR_DOMAIN_NET_TYPE_ETHERNET) {
-            virReportError(VIR_ERR_INVALID_NETWORK,
-                _("CHV driver only supports `ethernet` network types! Found %s"),
-                                            virDomainNetModelTypeToString(net->type));
-            return -1;
-        }
         if (!virDomainNetIsVirtioModel(net)) {
             DBG("Found non PCI net device with model type %s", virDomainNetModelTypeToString(net->model));
             continue;
