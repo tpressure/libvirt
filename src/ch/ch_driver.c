@@ -66,7 +66,7 @@ virCHDriver *ch_driver = NULL;
  * maintain a hardcoded list here for now.
 */
 static const char *cpu_models[] = {
-    "skylake"
+    "skylake",
     "sapphire-rapids",
 };
 
