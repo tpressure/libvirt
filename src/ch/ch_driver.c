@@ -921,6 +921,7 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
     virDomainObjEndAPI(&vm);
     virObjectEventStateQueue(driver->domainEventState, event);
 
+    DBG("destroy finished");
     return ret;
 }
 
