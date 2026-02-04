@@ -887,8 +887,10 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
     if (virDomainDestroyFlagsEnsureACL(dom->conn, vm->def) < 0)
         goto cleanup;
 
+    DBG("XXXXXXXX before virDomainObjBeginJob");
     if (virDomainObjBeginJob(vm, VIR_JOB_DESTROY) < 0)
         goto cleanup;
+    DBG("XXXXXXXX after virDomainObjBeginJob");
 
     if (virDomainObjCheckActive(vm) < 0)
         goto endjob;
@@ -3577,6 +3579,8 @@ chDomainMigrateFinish3(virConnectPtr dconn,
         }
 
         virCHDomainRemoveInactive(driver, vm);
+
+        DBG("finished chDomainMigrateFinish3");
     }
 error:
     if (priv->args->tcp_serial_url) {
