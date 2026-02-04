@@ -2875,6 +2875,15 @@ chMigrationAnyParseURI(const char *uri, bool *wellFormed)
     return parsed;
 }
 
+void
+chDomainObjSetAsyncJobMask(virDomainObj *obj,
+                             unsigned long long allowedJobs)
+{
+    if (!obj->job->asyncJob)
+        return;
+
+    obj->job->mask = allowedJobs | JOB_MASK(VIR_JOB_DESTROY);
+}
 static int chMigrationJobStart(virDomainObj *vm,
                                virDomainAsyncJob job)
 {
@@ -2911,6 +2920,8 @@ static int chMigrationJobStart(virDomainObj *vm,
 
     if (virDomainObjBeginAsyncJob(vm, job, op, 0) < 0)
         return -1;
+
+    chDomainObjSetAsyncJobMask(vm, mask);
 
     return 0;
 }
