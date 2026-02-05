@@ -1638,6 +1638,7 @@ static int chStateCleanup(void)
         return -1;
 
     virBitmapFree(ch_driver->chCaps);
+    virSysinfoDefFree(ch_driver->hostsysinfo);
     virObjectUnref(ch_driver->config);
     virObjectUnref(ch_driver->xmlopt);
     virObjectUnref(ch_driver->caps);
@@ -1771,6 +1772,9 @@ chStateInitialize(bool privileged,
 
     if (!(ch_driver->xmlopt = chDomainXMLConfInit(ch_driver)))
         goto cleanup;
+
+    if (privileged)
+        ch_driver->hostsysinfo = virSysinfoRead();
 
     if (!(ch_driver->config = virCHDriverConfigNew(privileged)))
         goto cleanup;
