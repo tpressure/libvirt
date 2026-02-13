@@ -2842,6 +2842,7 @@ chDoMigrateDstReceive(void *opaque)
     chMigrationDstArgs *args = opaque;
     virCHDomainObjPrivate *priv = args->priv;
     g_autofree char* rcv_uri = NULL;
+    virDomainObj* vm = priv->monitor->vm;
 
     DBG("Migration thread executing");
     if (!priv->monitor) {
@@ -2860,6 +2861,7 @@ chDoMigrateDstReceive(void *opaque)
                                      args->tcp_serial_url,
                                      args->use_tls) < 0) {
         DBG("Migration receive failed.");
+        virDomainObjSetState(vm, VIR_DOMAIN_CRASHED, VIR_DOMAIN_CRASHED_UNKNOWN);
         args->success = false;
         return;
     }
