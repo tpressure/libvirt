@@ -63,9 +63,6 @@ VIR_LOG_INIT("ch.ch_driver");
 
 virCHDriver *ch_driver = NULL;
 
-static void
-chDomainMigrateFinish3LocalFailure(virDomainObj* vm, virCHDriver* driver);
-
 /**
  * Cloud Hypervisor does not yet support to list all available CPU profiles. We
  * maintain a hardcoded list here for now.
@@ -2840,6 +2837,53 @@ chMigrationAnyPrepareDef(virCHDriver *driver,
 }
 
 static void
+chDomainMigrateFinish3LocalFailure(virDomainObj *vm, virCHDriver *driver)
+{
+    virCHDomainObjPrivate *priv = NULL;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
+
+    priv = vm->privateData;
+
+    DBG("Migration was unsuccessful, killing CHV process");
+    virCHProcessKill(driver, vm, VIR_DOMAIN_SHUTOFF_DESTROYED);
+
+    // XXX
+    /* virThreadJoin(priv->migrationDstReceiveThr); */
+
+    /* VIR_FREE(priv->migrationDstReceiveThr); */
+
+    if (virPortAllocatorRelease(priv->args->port) < 0) {
+        DBG("Could not release migration port");
+    }
+
+    virMutexDestroy(&priv->args->mutex);
+
+    if (virCondDestroy(&priv->args->cond) < 0) {
+        DBG("Failed to destroy migration condition variable");
+    }
+
+    virDomainObjRemoveTransientDef(vm);
+
+    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
+        goto error;
+    }
+    if (virDomainDeleteConfig(cfg->configDir, cfg->autostartDir, vm) < 0) {
+        goto error;
+    }
+
+    virCHDomainRemoveInactive(driver, vm);
+
+error:
+    if (priv->args->tcp_serial_url) {
+        VIR_FREE(priv->args->tcp_serial_url);
+    }
+    VIR_FREE(priv->args);
+    virDomainObjEndAsyncJob(vm);
+    virDomainObjEndAPI(&vm);
+}
+
+
+static void
 chDoMigrateDstReceive(void *opaque)
 {
     chMigrationDstArgs *args = opaque;
@@ -3514,52 +3558,6 @@ chDomainMigratePerform3Params(virDomainPtr dom,
 error:
     virDomainObjEndAPI(&vm);
     return rc;
-}
-
-static void
-chDomainMigrateFinish3LocalFailure(virDomainObj* vm, virCHDriver* driver)
-{
-    virCHDomainObjPrivate *priv = NULL;
-    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
-
-    priv = vm->privateData;
-
-    DBG("Migration was unsuccessful, killing CHV process");
-    virCHProcessKill(driver, vm, VIR_DOMAIN_SHUTOFF_DESTROYED);
-
-    // XXX
-    /* virThreadJoin(priv->migrationDstReceiveThr); */
-
-    /* VIR_FREE(priv->migrationDstReceiveThr); */
-
-    if (virPortAllocatorRelease(priv->args->port) < 0) {
-        DBG("Could not release migration port");
-    }
-
-    virMutexDestroy(&priv->args->mutex);
-
-    if (virCondDestroy(&priv->args->cond) < 0) {
-        DBG("Failed to destroy migration condition variable");
-    }
-
-    virDomainObjRemoveTransientDef(vm);
-
-    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
-        goto error;
-    }
-    if (virDomainDeleteConfig(cfg->configDir, cfg->autostartDir, vm) < 0) {
-        goto error;
-    }
-
-    virCHDomainRemoveInactive(driver, vm);
-
-error:
-    if (priv->args->tcp_serial_url) {
-        VIR_FREE(priv->args->tcp_serial_url);
-    }
-    VIR_FREE(priv->args);
-    virDomainObjEndAsyncJob(vm);
-    virDomainObjEndAPI(&vm);
 }
 
 static virDomainPtr
