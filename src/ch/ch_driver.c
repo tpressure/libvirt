@@ -3513,9 +3513,8 @@ error:
 }
 
 static void
-chDomainMigrateFinish3LocalFailure(virDomainObj* vm)
+chDomainMigrateFinish3LocalFailure(virDomainObj* vm, virCHDriver* driver)
 {
-    virCHDriver *driver = vm->conn->privateData;
     virCHDomainObjPrivate *priv = NULL;
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
 
