@@ -3549,6 +3549,7 @@ chDomainMigrateFinish3LocalFailure(virDomainObj* vm, virCHDriver* driver)
 
     virCHDomainRemoveInactive(driver, vm);
 
+error:
     if (priv->args->tcp_serial_url) {
         VIR_FREE(priv->args->tcp_serial_url);
     }
