@@ -2863,6 +2863,7 @@ chDoMigrateDstReceive(void *opaque)
         DBG("Migration receive failed.");
         virObjectLock(vm);
         virDomainObjSetState(vm, VIR_DOMAIN_CRASHED, VIR_DOMAIN_CRASHED_UNKNOWN);
+        virDomainObjEndAsyncJob(vm);
         virObjectUnlock(vm);
         args->success = false;
         return;
