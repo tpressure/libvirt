@@ -63,6 +63,9 @@ VIR_LOG_INIT("ch.ch_driver");
 
 virCHDriver *ch_driver = NULL;
 
+static void
+chDomainMigrateFinish3LocalFailure(virDomainObj* vm, virCHDriver* driver);
+
 /**
  * Cloud Hypervisor does not yet support to list all available CPU profiles. We
  * maintain a hardcoded list here for now.
