@@ -3512,6 +3512,52 @@ error:
     return rc;
 }
 
+static void
+chDomainMigrateFinish3LocalFailure(virDomainObj* vm)
+{
+    virCHDriver *driver = vm->conn->privateData;
+    virCHDomainObjPrivate *priv = NULL;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
+
+    priv = vm->privateData;
+
+    DBG("Migration was unsuccessful, killing CHV process");
+    virCHProcessKill(driver, vm, VIR_DOMAIN_SHUTOFF_DESTROYED);
+
+    // XXX
+    /* virThreadJoin(priv->migrationDstReceiveThr); */
+
+    /* VIR_FREE(priv->migrationDstReceiveThr); */
+
+    if (virPortAllocatorRelease(priv->args->port) < 0) {
+        DBG("Could not release migration port");
+    }
+
+    virMutexDestroy(&priv->args->mutex);
+
+    if (virCondDestroy(&priv->args->cond) < 0) {
+        DBG("Failed to destroy migration condition variable");
+    }
+
+    virDomainObjRemoveTransientDef(vm);
+
+    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
+        goto error;
+    }
+    if (virDomainDeleteConfig(cfg->configDir, cfg->autostartDir, vm) < 0) {
+        goto error;
+    }
+
+    virCHDomainRemoveInactive(driver, vm);
+
+    if (priv->args->tcp_serial_url) {
+        VIR_FREE(priv->args->tcp_serial_url);
+    }
+    VIR_FREE(priv->args);
+    virDomainObjEndAsyncJob(vm);
+    virDomainObjEndAPI(&vm);
+}
+
 static virDomainPtr
 chDomainMigrateFinish3(virConnectPtr dconn,
                        const char *dname,
