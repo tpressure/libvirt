@@ -2862,10 +2862,11 @@ chDoMigrateDstReceive(void *opaque)
                                      args->use_tls) < 0) {
         DBG("Migration receive failed.");
         virObjectLock(vm);
-        virDomainObjSetState(vm, VIR_DOMAIN_CRASHED, VIR_DOMAIN_CRASHED_UNKNOWN);
-        virDomainObjEndAsyncJob(vm);
-        virObjectUnlock(vm);
+        /* virDomainObjSetState(vm, VIR_DOMAIN_CRASHED, VIR_DOMAIN_CRASHED_UNKNOWN); */
+        /* virDomainObjEndAsyncJob(vm); */
         args->success = false;
+        chDomainMigrateFinish3LocalFailure(vm, args->driver);
+        virObjectUnlock(vm);
         return;
     }
 
@@ -3330,7 +3331,7 @@ chDomainMigratePerform3Impl(virDomainObj *vm,
     if (virCHMonitorMigrationSend(priv->monitor, uri, parallel_connections, use_tls, driver->config->migrateTLSx509certdir) < 0) {
         DBG("Migration send failed.");
 
-        ddomain = dconn->driver->domainMigrateFinish3(dconn, vm->def->name, NULL, 0, NULL, NULL, NULL, uri, flags, 1);
+        /* ddomain = dconn->driver->domainMigrateFinish3(dconn, vm->def->name, NULL, 0, NULL, NULL, NULL, uri, flags, 1); */
         virObjectUnref(ddomain);
         rc = -1;
         goto cleanup;
