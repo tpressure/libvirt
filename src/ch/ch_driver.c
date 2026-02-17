@@ -2929,6 +2929,10 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm_, virCHDriver *driver)
 
 
 error:
+    data = g_new0(struct mig_cleanup_opaque, 1);
+    data->vm = virObjectRef(vm);
+    data->thr = priv->migrationDstReceiveThr;
+
     if (priv->args->tcp_serial_url) {
         VIR_FREE(priv->args->tcp_serial_url);
     }
@@ -2944,9 +2948,6 @@ error:
 
     /* VIR_FREE(priv->migrationDstReceiveThr); */
 
-    data = g_new0(struct mig_cleanup_opaque, 1);
-    data->vm = virObjectRef(vm);
-    data->thr = priv->migrationDstReceiveThr;
     virEventAddTimeout(0, migCleanupCb, data, migCleanupFree);
 }
 
