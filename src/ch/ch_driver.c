@@ -2837,10 +2837,32 @@ chMigrationAnyPrepareDef(virCHDriver *driver,
 }
 
 static void
-chDomainMigrateFinish3LocalFailure(virDomainObj *vm, virCHDriver *driver)
+chDomainMigrateFinish3LocalFailure(virDomainObj *vm_, virCHDriver *driver)
 {
     virCHDomainObjPrivate *priv = NULL;
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
+    char* dname = vm_->def->name;
+    virDomainObj *vm = NULL;
+    virDomainPtr dom = NULL;
+
+    vm = virDomainObjListFindByName(driver->domains, dname);
+    if (!vm) {
+        virReportError(VIR_ERR_NO_DOMAIN,
+                       _("no domain with matching name '%1$s'"), dname);
+        return NULL;
+    }
+    DBG("Domain %s has been found", dname);
+
+    if (virDomainMigrateFinish3EnsureACL(dconn, vm->def) < 0) {
+        virDomainObjEndAPI(&vm);
+        return NULL;
+    }
+    if (!(dom = virGetDomain(dconn, vm->def->name, vm->def->uuid, vm->def->id))) {
+        virDomainObjEndAPI(&vm);
+        DBG("virGetDomain failed.");
+        return NULL;
+
+    }
 
     priv = vm->privateData;
 
