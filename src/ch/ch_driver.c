@@ -2881,11 +2881,11 @@ error:
     VIR_FREE(priv->args);
 
     virDomainObjEndAsyncJob(vm);
-    if (!virDomainObjIsActive(vm)) {
-        DBG("xxxxxxxxxxxxxxx");
-        virCHDomainRemoveInactive(driver, vm);
-    }
-    virDomainObjEndAPI(&vm);
+
+    DBG("xxxxxxxxxxxxxxx");
+    virCHDomainRemoveInactive(driver, vm);
+
+    /* virDomainObjEndAPI(&vm); */
     DBG("Leaving local cleanup");
 }
 
