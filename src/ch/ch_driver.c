@@ -2836,6 +2836,49 @@ chMigrationAnyPrepareDef(virCHDriver *driver,
     return def;
 }
 
+struct mig_cleanup_opaque {
+    virDomainObj *vm;          /* take a ref! */
+    virThreadPtr thr;          /* priv->migrationDstReceiveThr */
+    /* anything else you need */
+};
+
+static void
+migCleanupFree(void *opaque)
+{
+    struct mig_cleanup_opaque *data = opaque;
+    if (data->vm)
+        virObjectUnref(data->vm);
+    VIR_FREE(data);
+}
+
+static void
+migCleanupCb(int timer, void *opaque)
+{
+    struct mig_cleanup_opaque *data = opaque;
+
+    /* one-shot */
+    virEventRemoveTimeout(timer);
+
+    /*
+     * IMPORTANT:
+     *  - take whatever locks your driver requires
+     *  - do NOT hold vm lock while joining if your thread might take it
+     */
+
+    /* Example outline (pseudo): */
+    // virDomainObjLock(data->vm);
+    // virDomainObjUnlock(data->vm);
+
+    if (data->thr) {
+        virThreadJoin(data->thr);
+        VIR_FREE(data->thr);
+    }
+
+    // virDomainObjLock(data->vm);
+    // ... finish failure cleanup ...
+    // virDomainObjUnlock(data->vm);
+}
+
 static void
 chDomainMigrateFinish3LocalFailure(virDomainObj *vm_, virCHDriver *driver)
 {
@@ -2844,6 +2887,8 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm_, virCHDriver *driver)
     char* dname = vm_->def->name;
     virDomainObj *vm = NULL;
     virDomainPtr dom = NULL;
+    struct mig_cleanup_opaque *data;
+    int timer;
 
     vm = virDomainObjListFindByName(driver->domains, dname);
     if (!vm) {
@@ -2897,7 +2942,12 @@ error:
     virDomainObjEndAPI(&vm);
     DBG("Leaving local cleanup");
 
-    VIR_FREE(priv->migrationDstReceiveThr);
+    /* VIR_FREE(priv->migrationDstReceiveThr); */
+
+    data = g_new0(struct mig_cleanup_opaque, 1);
+    data->vm = virObjectRef(vm);
+    data->thr = priv->migrationDstReceiveThr;
+    virEventAddTimeout(0, migCleanupCb, data, migCleanupFree);
 }
 
 
@@ -2926,12 +2976,8 @@ chDoMigrateDstReceive(void *opaque)
                                      args->tcp_serial_url,
                                      args->use_tls) < 0) {
         DBG("Migration receive failed.");
-        /* virObjectLock(vm); */
-        /* virDomainObjSetState(vm, VIR_DOMAIN_CRASHED, VIR_DOMAIN_CRASHED_UNKNOWN); */
-        /* virDomainObjEndAsyncJob(vm); */
         args->success = false;
         chDomainMigrateFinish3LocalFailure(vm, args->driver);
-        /* virObjectUnlock(vm); */
         return;
     }
 
