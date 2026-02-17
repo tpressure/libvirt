@@ -2873,10 +2873,10 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm, virCHDriver *driver)
         goto error;
     }
 
-    if (!virDomainObjIsActive(vm)) {
-        DBG("xxxxxxxxxxxxxxx");
-        virCHDomainRemoveInactive(driver, vm);
-    }
+    /* if (!virDomainObjIsActive(vm)) { */
+        /* DBG("xxxxxxxxxxxxxxx"); */
+        /* virCHDomainRemoveInactive(driver, vm); */
+    /* } */
 
 error:
     if (priv->args->tcp_serial_url) {
