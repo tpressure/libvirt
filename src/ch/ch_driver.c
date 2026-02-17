@@ -2865,19 +2865,22 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm, virCHDriver *driver)
     virDomainObjRemoveTransientDef(vm);
 
     if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
+        DBG("xxxxxxxxxxxxxxxxxx 1");
         goto error;
     }
     if (virDomainDeleteConfig(cfg->configDir, cfg->autostartDir, vm) < 0) {
+        DBG("xxxxxxxxxxxxxxxxxx 2");
         goto error;
     }
 
-    virCHDomainRemoveInactive(driver, vm);
 
 error:
     if (priv->args->tcp_serial_url) {
         VIR_FREE(priv->args->tcp_serial_url);
     }
     VIR_FREE(priv->args);
+
+    virCHDomainRemoveInactive(driver, vm);
     virDomainObjEndAsyncJob(vm);
     virDomainObjEndAPI(&vm);
 }
