@@ -2844,7 +2844,7 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm, virCHDriver *driver)
 
     priv = vm->privateData;
 
-    DBG("Migration was unsuccessful, killing CHV process");
+    DBG("Migration for VM %s was unsuccessful, killing CHV process", priv->machineName);
     virCHProcessKill(driver, vm, VIR_DOMAIN_SHUTOFF_DESTROYED);
 
     // XXX
