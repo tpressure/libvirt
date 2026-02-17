@@ -2914,12 +2914,12 @@ chDoMigrateDstReceive(void *opaque)
                                      args->tcp_serial_url,
                                      args->use_tls) < 0) {
         DBG("Migration receive failed.");
-        /* virObjectLock(vm); */
+        virObjectLock(vm);
         /* virDomainObjSetState(vm, VIR_DOMAIN_CRASHED, VIR_DOMAIN_CRASHED_UNKNOWN); */
         /* virDomainObjEndAsyncJob(vm); */
         args->success = false;
         chDomainMigrateFinish3LocalFailure(vm, args->driver);
-        /* virObjectUnlock(vm); */
+        virObjectUnlock(vm);
         return;
     }
 
