@@ -2849,18 +2849,18 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm_, virCHDriver *driver)
     if (!vm) {
         virReportError(VIR_ERR_NO_DOMAIN,
                        _("no domain with matching name '%1$s'"), dname);
-        return NULL;
+        return;
     }
     DBG("Domain %s has been found", dname);
 
     if (virDomainMigrateFinish3EnsureACL(dconn, vm->def) < 0) {
         virDomainObjEndAPI(&vm);
-        return NULL;
+        return;
     }
     if (!(dom = virGetDomain(dconn, vm->def->name, vm->def->uuid, vm->def->id))) {
         virDomainObjEndAPI(&vm);
         DBG("virGetDomain failed.");
-        return NULL;
+        return;
 
     }
 
