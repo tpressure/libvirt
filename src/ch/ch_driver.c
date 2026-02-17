@@ -2853,10 +2853,6 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm_, virCHDriver *driver)
     }
     DBG("Domain %s has been found", dname);
 
-    if (virDomainMigrateFinish3EnsureACL(dconn, vm->def) < 0) {
-        virDomainObjEndAPI(&vm);
-        return;
-    }
     if (!(dom = virGetDomain(dconn, vm->def->name, vm->def->uuid, vm->def->id))) {
         virDomainObjEndAPI(&vm);
         DBG("virGetDomain failed.");
