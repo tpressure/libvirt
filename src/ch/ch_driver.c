@@ -2880,8 +2880,8 @@ error:
     }
     VIR_FREE(priv->args);
 
-    virCHDomainRemoveInactive(driver, vm);
     virDomainObjEndAsyncJob(vm);
+    virCHDomainRemoveInactive(driver, vm);
     virDomainObjEndAPI(&vm);
 }
 
