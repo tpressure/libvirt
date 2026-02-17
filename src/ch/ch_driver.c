@@ -2853,13 +2853,6 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm_, virCHDriver *driver)
     }
     DBG("Domain %s has been found", dname);
 
-    if (!(dom = virGetDomain(dconn, vm->def->name, vm->def->uuid, vm->def->id))) {
-        virDomainObjEndAPI(&vm);
-        DBG("virGetDomain failed.");
-        return;
-
-    }
-
     priv = vm->privateData;
 
     DBG("Migration for VM %s was unsuccessful, killing CHV process", priv->machineName);
