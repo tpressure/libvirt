@@ -2896,7 +2896,7 @@ error:
     DBG("xxxxxxxxxxxxxxx");
     virCHDomainRemoveInactive(driver, vm);
 
-    /* virDomainObjEndAPI(&vm); */
+    virDomainObjEndAPI(&vm);
     DBG("Leaving local cleanup");
 }
 
