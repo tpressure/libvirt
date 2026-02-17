@@ -2871,7 +2871,7 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm, virCHDriver *driver)
         goto error;
     }
 
-    /* virCHDomainRemoveInactive(driver, vm); */
+    virCHDomainRemoveInactive(driver, vm);
 
 error:
     if (priv->args->tcp_serial_url) {
