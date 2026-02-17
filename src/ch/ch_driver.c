@@ -2838,7 +2838,7 @@ chMigrationAnyPrepareDef(virCHDriver *driver,
 
 struct mig_cleanup_opaque {
     virDomainObj *vm;          /* take a ref! */
-    virThreadPtr thr;          /* priv->migrationDstReceiveThr */
+    virThread *thr;          /* priv->migrationDstReceiveThr */
     /* anything else you need */
 };
 
