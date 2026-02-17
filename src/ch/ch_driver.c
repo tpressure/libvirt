@@ -2873,6 +2873,10 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm, virCHDriver *driver)
         goto error;
     }
 
+    if (!virDomainObjIsActive(vm)) {
+        DBG("xxxxxxxxxxxxxxx");
+        virCHDomainRemoveInactive(driver, vm);
+    }
 
 error:
     if (priv->args->tcp_serial_url) {
@@ -2881,7 +2885,6 @@ error:
     VIR_FREE(priv->args);
 
     virDomainObjEndAsyncJob(vm);
-    virCHDomainRemoveInactive(driver, vm);
     virDomainObjEndAPI(&vm);
 }
 
