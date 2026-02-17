@@ -2861,8 +2861,6 @@ chDomainMigrateFinish3LocalFailure(virDomainObj *vm_, virCHDriver *driver)
     // XXX
     /* virThreadJoin(priv->migrationDstReceiveThr); */
 
-    /* VIR_FREE(priv->migrationDstReceiveThr); */
-
     if (virPortAllocatorRelease(priv->args->port) < 0) {
         DBG("Could not release migration port");
     }
@@ -2898,6 +2896,8 @@ error:
 
     virDomainObjEndAPI(&vm);
     DBG("Leaving local cleanup");
+
+    VIR_FREE(priv->migrationDstReceiveThr);
 }
 
 
