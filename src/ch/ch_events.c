@@ -175,7 +175,7 @@ virCHProcessEvent(virCHMonitor *mon,
         break;
     case VIR_CH_EVENT_VM_REBOOTED:
         virObjectLock(vm);
-        virCHProcessUpdateInfo(vm);
+        virCHProcessSetup(vm);
         virObjectUnlock(vm);
         break;
     case VIR_CH_EVENT_LAST:
