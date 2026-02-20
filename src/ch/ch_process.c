@@ -1086,9 +1086,6 @@ virCHProcessStart(virCHDriver *driver,
 
     virInhibitorHold(driver->inhibitor);
 
-    if (virCHProcessSetup(vm) < 0)
-        goto cleanup;
-
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, reason);
     if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
         DBG("Failed to save status on vm %s", vm->def->name);
@@ -1307,9 +1304,6 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
 
     /* Restore is a synchronous operation in CH. so, pass false to wait until there's a response */
     if (chSocketProcessHttpResponse(mon_sockfd, false) < 0)
-        goto cleanup;
-
-    if (virCHProcessSetup(vm) < 0)
         goto cleanup;
 
     virDomainObjSetState(vm, VIR_DOMAIN_PAUSED, VIR_DOMAIN_PAUSED_FROM_SNAPSHOT);
