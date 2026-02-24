@@ -1556,9 +1556,11 @@ virCHMonitorPut(virCHMonitor *mon,
 int
 virCHMonitorPutNoContent(virCHMonitor *mon,
                          const char *endpoint,
-                         domainLogContext *logCtxt)
+                         G_GNUC_UNUSED domainLogContext *logCtxt)
 {
-    return virCHMonitorPut(mon, endpoint, NULL, logCtxt, NULL);
+    int responseCode = virCHMonitorRequest(mon, endpoint, NULL, "PUT", false).code;
+
+    return !(responseCode == 200 || responseCode == 204);
 }
 
 bool
