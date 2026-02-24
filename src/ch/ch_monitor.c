@@ -1489,68 +1489,34 @@ virCHMonitorPut(virCHMonitor *mon,
                 domainLogContext *logCtxt,
                 virJSONValue **answer)
 {
-    g_autofree char *url = NULL;
     g_autofree char *payload_str = NULL;
-    int responseCode = 0;
-    int ret = -1;
-    struct curl_data data = {0};
-    struct curl_slist *headers = NULL;
-    CURL *handle = NULL;
+    HttpResponse response;
 
-    url = g_strdup_printf("%s/%s", URL_ROOT, endpoint);
+    if (payload)
+        payload_str = virJSONValueToString(payload, false);
 
-    VIR_WITH_OBJECT_LOCK_GUARD(mon) {
-        handle = curl_easy_init();
-        curl_easy_setopt(handle, CURLOPT_UNIX_SOCKET_PATH, mon->socketpath);
-        curl_easy_setopt(handle, CURLOPT_URL, url);
-        curl_easy_setopt(handle, CURLOPT_UPLOAD, 1L);
-        curl_easy_setopt(handle, CURLOPT_HTTPHEADER, NULL);
-        curl_easy_setopt(handle, CURLOPT_INFILESIZE, 0L);
-        headers = curl_slist_append(headers, "Accept: application/json");
-        curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, curl_callback);
-        curl_easy_setopt(handle, CURLOPT_WRITEDATA, (void *)&data);
+    response = virCHMonitorRequest(mon, endpoint, payload_str, "PUT",
+                                   answer != NULL);
 
-        if (payload) {
-            payload_str = virJSONValueToString(payload, false);
-            curl_easy_setopt(handle, CURLOPT_POSTFIELDS, payload_str);
-            curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "PUT");
-            headers = curl_slist_append(headers, "Content-Type: application/json");
-        }
-
-        responseCode = virCHMonitorCurlPerform(handle);
-        curl_easy_cleanup(handle);
-    }
-
-    data.content = g_realloc(data.content, data.size + 1);
-    data.content[data.size] = '\0';
-
-    if (logCtxt && data.size) {
-        /* Do this to append a NULL char at the end of data */
-        domainLogContextWrite(logCtxt, "HTTP response code from CH: %d\n", responseCode);
-        domainLogContextWrite(logCtxt, "Response = %s\n", data.content);
-    }
-
-    if (data.size)
-        DBG("HTTP Response: %s", data.content);
-
-    if (responseCode != 200 && responseCode != 204) {
-        ret = -1;
+    if (response.code != 200 && response.code != 204) {
+        virJSONValueFree(response.json);
         virReportError(VIR_ERR_INTERNAL_ERROR,
                        _("Invalid HTTP response code from CH: %1$d"),
-                       responseCode);
-        goto cleanup;
+                       response.code);
+        return -1;
+    }
+
+    if (logCtxt) {
+        domainLogContextWrite(logCtxt, "HTTP response code from CH: %d\n",
+                              response.code);
     }
 
     if (answer)
-        *answer = virJSONValueFromString(data.content);
+        *answer = g_steal_pointer(&response.json);
+    else
+        virJSONValueFree(response.json);
 
-    ret = 0;
-
- cleanup:
-    curl_slist_free_all(headers);
-    g_free(data.content);
-    return ret;
+    return 0;
 }
 
 int
