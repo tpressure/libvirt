@@ -230,10 +230,8 @@ int virCHMonitorRemoveDevice(virCHMonitor *mon,
 int virCHMonitorBuildRestoreJson(virDomainDef *vmdef,
                                  const char *from,
                                  char **jsonstr);
-
-bool
+int
 virCHMonitorPutNoResponse(virCHMonitor *mon, const char *endpoint,
-                const char *payload);
                 const char *payload);
 int
 virCHMonitorBuildMemoryZonesJson(virJSONValue *content, virDomainDef *def);
