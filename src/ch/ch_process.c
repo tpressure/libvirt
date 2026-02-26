@@ -639,7 +639,7 @@ chProcessAddNetworkDevice(virCHDriver *driver,
 
     if (rc < 0) {
         virReportSystemError(saved_errno, "%s",
-                                _("Failed to send net-add request to CH"));
+                             _("Failed to send net-add request to CH"));
         ret = -1;
         goto cleanup;
     }
@@ -900,7 +900,7 @@ int virCHProcessInitNetwork(virCHDriver *driver,
     /* Bring up netdevs before starting CPUs */
     if (virDomainInterfaceStartDevices(vm->def) < 0) {
         DBG("Failed virDomainInterfaceStartDevices");
-        return -1;
+        goto cleanup;
     }
 
     return 0;
@@ -1087,7 +1087,7 @@ virCHProcessStart(virCHDriver *driver,
 
     /* Bring up netdevs before starting CPUs */
     if (virDomainInterfaceStartDevices(vm->def) < 0)
-        return -1;
+        goto cleanup;
 
     if (virCHMonitorBootVM(priv->monitor) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
