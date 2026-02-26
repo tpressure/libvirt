@@ -569,11 +569,11 @@ chProcessAddNetworkDevice(virCHDriver *driver,
     g_autofree int *tapfds = NULL;
     g_autofree char *payload = NULL;
     g_autofree char *netJSONPayload = NULL;
-    g_autofree char *response = NULL;
-    size_t tapfd_len;
+    size_t tapfd_len = 0;
     size_t payload_len;
-    int saved_errno;
-    int rc;
+    int saved_errno = 0;
+    int rc = 0;
+    int ret = -1;
 
     if (!virBitmapIsBitSet(driver->chCaps, CH_MULTIFD_IN_ADDNET)) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
@@ -597,7 +597,6 @@ chProcessAddNetworkDevice(virCHDriver *driver,
             */
         net->driver.virtio.queues = 1;
     }
-    tapfd_len = net->driver.virtio.queues;
 
     if (virCHDomainValidateActualNetDef(net) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
@@ -605,7 +604,7 @@ chProcessAddNetworkDevice(virCHDriver *driver,
         DBG("virCHDomainValidateActualNetDef failed.");
         return -1;
     }
-
+    tapfd_len = net->driver.virtio.queues;
     tapfds = g_new0(int, tapfd_len);
     memset(tapfds, -1, (tapfd_len) * sizeof(int));
 
@@ -614,13 +613,18 @@ chProcessAddNetworkDevice(virCHDriver *driver,
                                      nicindexes, nnicindexes) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                         _("Failed to connect network interfaces"));
-        return -1;
+        /* In case a few FDs were opened already, we need to close them as well.
+         * The cleanup takes care that `-1` FDs are ignored. */
+        ret = -1;
+        goto cleanup;
     }
 
     if (virCHMonitorBuildNetJson(net, &netJSONPayload) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                         _("Failed to build net json"));
-        return -1;
+        DBG("virCHMonitorBuildNetJson failed.");
+        ret = -1;
+        goto cleanup;
     }
 
     virBufferAsprintf(&buf, "%s", virBufferCurrentContent(&http_headers));
@@ -633,19 +637,26 @@ chProcessAddNetworkDevice(virCHDriver *driver,
                                  tapfds, tapfd_len);
     saved_errno = errno;
 
-    /* Close sent tap fds in Libvirt, as they have been dup()ed in CH */
-    chCloseFDs(tapfds, tapfd_len);
-
     if (rc < 0) {
         virReportSystemError(saved_errno, "%s",
                                 _("Failed to send net-add request to CH"));
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
-    if (chSocketProcessHttpResponse(mon_sockfd, true) < 0)
-        return -1;
+    if (chSocketProcessHttpResponse(mon_sockfd, true) < 0) {
+        ret = -1;
+        goto cleanup;
+    }
 
-    return 0;
+    ret = 0;
+
+ cleanup:
+    if (tapfd_len > 0) {
+        /* On success: CH dup()ed the FDs already. */
+        chCloseFDs(tapfds, tapfd_len);
+    }
+    return ret;
 }
 
 /**
