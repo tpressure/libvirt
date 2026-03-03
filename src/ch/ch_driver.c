@@ -2957,6 +2957,7 @@ chDomainMigrateFinish3LocalFailure(char* dname, virCHDriver *driver)
     }
 
     VIR_FREE(priv->args);
+    priv->args = NULL;
 
     virCHDomainRemoveInactive(driver, vm);
 
@@ -3949,6 +3950,7 @@ error:
         virJSONValueFree(priv->args->cells);
     }
     VIR_FREE(priv->args);
+    priv->args = NULL;
     virDomainObjEndAsyncJob(vm);
     virDomainObjEndAPI(&vm);
     return dom;
