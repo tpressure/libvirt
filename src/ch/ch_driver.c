@@ -2875,7 +2875,6 @@ chMigrationAnyPrepareDef(virCHDriver *driver,
 }
 
 struct virCHMigrationCleanupOpaque {
-    virDomainObj *vm;
     virThread *thr;
 };
 
@@ -2883,8 +2882,6 @@ static void
 virCHMigrationCleanupFree(void *opaque)
 {
     struct virCHMigrationCleanupOpaque *data = opaque;
-    if (data->vm)
-        virObjectUnref(data->vm);
     VIR_FREE(data);
 }
 
@@ -2919,7 +2916,6 @@ chDomainMigrateFinish3LocalFailure(char* dname, virCHDriver *driver)
     priv = vm->privateData;
 
     cleanup = g_new0(struct virCHMigrationCleanupOpaque, 1);
-    cleanup->vm = virObjectRef(vm);
     cleanup->thr = priv->migrationDstReceiveThr;
 
     DBG("Migration for VM %s was unsuccessful, killing CHV process", dname);
