@@ -220,14 +220,14 @@ int virCHMonitorGetIOThreads(virCHMonitor *mon,
                              virDomainIOThreadInfo ***iothreads);
 int
 virCHMonitorBuildNetJson(virDomainNetDef *netdef,
-                         char **jsonstr);
+                         char **jsonstr,
+                         bool hyperv_enabled);
 int
 virCHMonitorAddDisk(virCHMonitor* mon,
                     virDomainDiskDef *diskdef);
 
 int virCHMonitorRemoveDevice(virCHMonitor *mon,
                              const char* device_id);
-
 int virCHMonitorBuildRestoreJson(virDomainDef *vmdef,
                                  const char *from,
                                  char **jsonstr);
