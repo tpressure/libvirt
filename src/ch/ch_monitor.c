@@ -650,6 +650,46 @@ virCHMonitorBuildRngJson(virJSONValue *content, virDomainDef *vmdef)
     return 0;
 }
 
+static int
+virCHMonitorBuildVsockJson(virJSONValue *content,
+                           virDomainDef *vmdef,
+                           const char *stateDir)
+{
+    g_autoptr(virJSONValue) vsock = NULL;
+    g_autofree char *socketPath = NULL;
+    virDomainVsockDef *vsockdef = vmdef->vsock;
+
+    if (vsockdef == NULL)
+        return 0;
+
+    if (vsockdef->model != VIR_DOMAIN_VSOCK_MODEL_VIRTIO &&
+        vsockdef->model != VIR_DOMAIN_VSOCK_MODEL_DEFAULT) {
+        virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
+                       _("Only virtio model is supported for vsock devices"));
+        return -1;
+    }
+
+    if (vsockdef->auto_cid == VIR_TRISTATE_BOOL_YES) {
+        virReportError(VIR_ERR_CONFIG_UNSUPPORTED, "%s",
+                       _("auto_cid is not supported for Cloud-Hypervisor vsock"));
+        return -1;
+    }
+
+    vsock = virJSONValueNewObject();
+    socketPath = g_strdup_printf("%s/%s-vsock", stateDir, vmdef->name);
+
+    if (virJSONValueObjectAppendNumberUint(vsock, "cid", vsockdef->guest_cid) < 0)
+        return -1;
+
+    if (virJSONValueObjectAppendString(vsock, "socket", socketPath) < 0)
+        return -1;
+
+    if (virJSONValueObjectAppend(content, "vsock", &vsock) < 0)
+        return -1;
+
+    return 0;
+}
+
 /**
  * virCHMonitorBuildNetJson:
  * @net: pointer to a guest network definition
@@ -997,6 +1037,9 @@ virCHMonitorBuildVMJson(virCHDriver *driver, virDomainDef *vmdef,
         return -1;
 
     if (virCHMonitorBuildRngJson(content, vmdef) < 0)
+        return -1;
+
+    if (virCHMonitorBuildVsockJson(content, vmdef, driver->config->stateDir) < 0)
         return -1;
 
     if (virCHMonitorBuildDevicesJson(content, vmdef) < 0)
