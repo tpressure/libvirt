@@ -320,6 +320,7 @@ chGuestAgentRecvMessage(int fd,
 
         if ((newline = strchr(*buffer, '\n'))) {
             g_autofree char *line = NULL;
+            const char *payload;
             size_t linelen = newline - *buffer;
             size_t remain;
 
@@ -333,10 +334,14 @@ chGuestAgentRecvMessage(int fd,
             (*buffer)[remain] = '\0';
             *buflen = remain;
 
-            if (line[0] == '\0')
+            payload = line;
+            while (*payload == '\xff')
+                payload++;
+
+            if (payload[0] == '\0')
                 continue;
 
-            if (!(*msg = virJSONValueFromString(line)))
+            if (!(*msg = virJSONValueFromString(payload)))
                 return -1;
 
             return 0;
