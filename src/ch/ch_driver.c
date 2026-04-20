@@ -73,6 +73,7 @@ virCHDriver *ch_driver = NULL;
 
 #define CH_GUEST_AGENT_DEFAULT_TIMEOUT 5
 #define CH_GUEST_AGENT_MAX_RESPONSE (10 * 1024 * 1024)
+#define CH_GUEST_AGENT_VSOCK_PORT 1234
 
 /**
  * Cloud Hypervisor does not yet support to list all available CPU profiles. We
@@ -490,7 +491,8 @@ chGuestAgentSync(int fd,
     if (virTimeMillisNow(&id) < 0)
         return -1;
 
-    syncCmd = g_strdup_printf("{\"execute\":\"guest-sync\",\"arguments\":{\"id\":%llu}}\n", id);
+    syncCmd = g_strdup_printf("\xff{\"execute\":\"guest-sync-delimited\",\"arguments\":{\"id\":%llu}}\n",
+                              id);
 
     if (chGuestAgentSendAll(fd, syncCmd, strlen(syncCmd)) < 0)
         return -1;
@@ -524,6 +526,7 @@ chGuestAgentOpenSocket(virDomainObj *vm)
     g_autoptr(virCHDriverConfig) cfg = NULL;
     struct sockaddr_un sa = { .sun_family = AF_UNIX };
     g_autofree char *path = NULL;
+    g_autofree char *connectCmd = NULL;
     int fd;
 
     if (!vm->def->vsock) {
@@ -553,6 +556,12 @@ chGuestAgentOpenSocket(virDomainObj *vm)
         virReportSystemError(errno,
                              _("Unable to connect to guest agent socket '%1$s'"),
                              path);
+        VIR_FORCE_CLOSE(fd);
+        return -1;
+    }
+
+    connectCmd = g_strdup_printf("CONNECT %d\n", CH_GUEST_AGENT_VSOCK_PORT);
+    if (chGuestAgentSendAll(fd, connectCmd, strlen(connectCmd)) < 0) {
         VIR_FORCE_CLOSE(fd);
         return -1;
     }
