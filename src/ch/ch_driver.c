@@ -20,6 +20,9 @@
 
 #include <config.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #include "ch_alias.h"
 #include "ch_capabilities.h"
@@ -51,19 +54,25 @@
 #include "virlog.h"
 #include "virobject.h"
 #include "virfile.h"
+#include "virtime.h"
 #include "virtypedparam.h"
 #include "virutil.h"
 #include "viruuid.h"
 #include "virnuma.h"
 #include "virhostmem.h"
+#include "virstring.h"
 
 #include "util/virportallocator.h"
+#include "viraccessapicheckqemu.h"
 
 #define VIR_FROM_THIS VIR_FROM_CH
 
 VIR_LOG_INIT("ch.ch_driver");
 
 virCHDriver *ch_driver = NULL;
+
+#define CH_GUEST_AGENT_DEFAULT_TIMEOUT 5
+#define CH_GUEST_AGENT_MAX_RESPONSE (10 * 1024 * 1024)
 
 /**
  * Cloud Hypervisor does not yet support to list all available CPU profiles. We
@@ -210,6 +219,409 @@ chDomainManagedSavePath(virCHDriver *driver, virDomainObj *vm)
 {
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     return g_strdup_printf("%s/%s.save", cfg->saveDir, vm->def->name);
+}
+
+
+static int
+chGuestAgentTimeoutToMS(int timeout)
+{
+    switch (timeout) {
+    case VIR_DOMAIN_QEMU_AGENT_COMMAND_BLOCK:
+        return -1;
+
+    case VIR_DOMAIN_QEMU_AGENT_COMMAND_DEFAULT:
+        return CH_GUEST_AGENT_DEFAULT_TIMEOUT * 1000;
+
+    case VIR_DOMAIN_QEMU_AGENT_COMMAND_NOWAIT:
+        return 0;
+
+    default:
+        return timeout * 1000;
+    }
+}
+
+
+static int
+chGuestAgentPoll(int fd,
+                 int timeoutms)
+{
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLIN,
+    };
+    int rc;
+
+    do {
+        rc = poll(&pfd, 1, timeoutms);
+    } while (rc < 0 && errno == EINTR);
+
+    if (rc < 0) {
+        virReportSystemError(errno, "%s",
+                             _("Unable to poll guest agent socket"));
+        return -1;
+    }
+
+    if (rc == 0) {
+        virReportError(VIR_ERR_AGENT_COMMAND_TIMEOUT,
+                       _("guest agent didn't respond to command within '%1$d' seconds"),
+                       timeoutms / 1000);
+        return -1;
+    }
+
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        virReportError(VIR_ERR_AGENT_UNRESPONSIVE, "%s",
+                       _("Guest agent disappeared while executing command"));
+        return -1;
+    }
+
+    return 0;
+}
+
+
+static int
+chGuestAgentSendAll(int fd,
+                    const char *buf,
+                    size_t len)
+{
+    size_t off = 0;
+
+    while (off < len) {
+        ssize_t done;
+
+        do {
+            done = send(fd, buf + off, len - off, 0);
+        } while (done < 0 && errno == EINTR);
+
+        if (done < 0) {
+            virReportSystemError(errno, "%s",
+                                 _("Unable to send data to guest agent"));
+            return -1;
+        }
+
+        off += done;
+    }
+
+    return 0;
+}
+
+
+static int
+chGuestAgentRecvMessage(int fd,
+                        int timeoutms,
+                        char **buffer,
+                        size_t *buflen,
+                        virJSONValue **msg)
+{
+    *msg = NULL;
+
+    while (true) {
+        char *newline;
+
+        if ((newline = strchr(*buffer, '\n'))) {
+            g_autofree char *line = NULL;
+            size_t linelen = newline - *buffer;
+            size_t remain;
+
+            if (linelen > 0 && (*buffer)[linelen - 1] == '\r')
+                linelen--;
+
+            line = g_strndup(*buffer, linelen);
+
+            remain = *buflen - (newline + 1 - *buffer);
+            memmove(*buffer, newline + 1, remain);
+            (*buffer)[remain] = '\0';
+            *buflen = remain;
+
+            if (line[0] == '\0')
+                continue;
+
+            if (!(*msg = virJSONValueFromString(line)))
+                return -1;
+
+            return 0;
+        }
+
+        if (*buflen >= CH_GUEST_AGENT_MAX_RESPONSE) {
+            virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                           _("guest agent reply exceeded maximum size"));
+            return -1;
+        }
+
+        if (chGuestAgentPoll(fd, timeoutms) < 0)
+            return -1;
+
+        while (true) {
+            char tmp[4096];
+            ssize_t got;
+
+            do {
+                got = recv(fd, tmp, sizeof(tmp), 0);
+            } while (got < 0 && errno == EINTR);
+
+            if (got < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    break;
+
+                virReportSystemError(errno, "%s",
+                                     _("Unable to read data from guest agent"));
+                return -1;
+            }
+
+            if (got == 0) {
+                virReportError(VIR_ERR_AGENT_UNRESPONSIVE, "%s",
+                               _("Guest agent disappeared while executing command"));
+                return -1;
+            }
+
+            *buffer = g_realloc(*buffer, *buflen + got + 1);
+            memcpy(*buffer + *buflen, tmp, got);
+            *buflen += got;
+            (*buffer)[*buflen] = '\0';
+
+            if (*buflen >= CH_GUEST_AGENT_MAX_RESPONSE) {
+                virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                               _("guest agent reply exceeded maximum size"));
+                return -1;
+            }
+
+            if ((size_t) got < sizeof(tmp))
+                break;
+        }
+    }
+}
+
+
+static const char *
+chGuestAgentCommandName(virJSONValue *cmd)
+{
+    return virJSONValueObjectGetString(cmd, "execute");
+}
+
+
+static const char *
+chGuestAgentStringifyErrorClass(const char *klass)
+{
+    if (STREQ_NULLABLE(klass, "BufferOverrun"))
+        return _("Buffer overrun");
+    if (STREQ_NULLABLE(klass, "CommandDisabled"))
+        return _("The command has been disabled for this instance");
+    if (STREQ_NULLABLE(klass, "CommandNotFound"))
+        return _("The command has not been found");
+    if (STREQ_NULLABLE(klass, "FdNotFound"))
+        return _("File descriptor not found");
+    if (STREQ_NULLABLE(klass, "InvalidParameter"))
+        return _("Invalid parameter");
+    if (STREQ_NULLABLE(klass, "InvalidParameterType"))
+        return _("Invalid parameter type");
+    if (STREQ_NULLABLE(klass, "InvalidParameterValue"))
+        return _("Invalid parameter value");
+    if (STREQ_NULLABLE(klass, "OpenFileFailed"))
+        return _("Cannot open file");
+    if (STREQ_NULLABLE(klass, "QgaCommandFailed"))
+        return _("Guest agent command failed");
+    if (STREQ_NULLABLE(klass, "QMPBadInputObjectMember"))
+        return _("Invalid JSON data");
+    if (STREQ_NULLABLE(klass, "QMPExtraInputObjectMember"))
+        return _("Unexpected extra JSON member");
+
+    return NULL;
+}
+
+
+static char *
+chGuestAgentStringifyError(virJSONValue *error)
+{
+    const char *klass = virJSONValueObjectGetString(error, "class");
+    const char *desc = virJSONValueObjectGetString(error, "desc");
+    const char *detail = NULL;
+
+    if (desc)
+        return g_strdup(desc);
+
+    if ((detail = chGuestAgentStringifyErrorClass(klass)))
+        return g_strdup(detail);
+
+    return g_strdup(_("unknown error"));
+}
+
+
+static int
+chGuestAgentCheckReply(virJSONValue *cmd,
+                       virJSONValue *reply)
+{
+    if (virJSONValueObjectHasKey(reply, "error")) {
+        virJSONValue *error = virJSONValueObjectGet(reply, "error");
+        g_autofree char *detail = NULL;
+
+        detail = error ? chGuestAgentStringifyError(error) : NULL;
+
+        virReportError(VIR_ERR_AGENT_COMMAND_FAILED,
+                       _("unable to execute QEMU agent command '%1$s': %2$s"),
+                       chGuestAgentCommandName(cmd),
+                       NULLSTR(detail));
+        return -1;
+    }
+
+    if (!virJSONValueObjectHasKey(reply, "return")) {
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       _("QEMU agent command '%1$s' returned neither error nor success"),
+                       chGuestAgentCommandName(cmd));
+        return -1;
+    }
+
+    return 0;
+}
+
+
+static int
+chGuestAgentSync(int fd,
+                 int timeout,
+                 char **buffer,
+                 size_t *buflen)
+{
+    g_autofree char *syncCmd = NULL;
+    g_autoptr(virJSONValue) msg = NULL;
+    unsigned long long id = 0;
+    int timeoutms = chGuestAgentTimeoutToMS(timeout);
+
+    if (timeoutms == 0)
+        timeoutms = CH_GUEST_AGENT_DEFAULT_TIMEOUT * 1000;
+
+    if (virTimeMillisNow(&id) < 0)
+        return -1;
+
+    syncCmd = g_strdup_printf("{\"execute\":\"guest-sync\",\"arguments\":{\"id\":%llu}}\n", id);
+
+    if (chGuestAgentSendAll(fd, syncCmd, strlen(syncCmd)) < 0)
+        return -1;
+
+    while (true) {
+        unsigned long long rid;
+
+        g_clear_pointer(&msg, virJSONValueFree);
+
+        if (chGuestAgentRecvMessage(fd, timeoutms, buffer, buflen, &msg) < 0) {
+            if (virGetLastErrorCode() == VIR_ERR_AGENT_COMMAND_TIMEOUT) {
+                virReportError(VIR_ERR_AGENT_UNRESPONSIVE,
+                               _("guest agent didn't respond to synchronization within '%1$d' seconds"),
+                               timeoutms / 1000);
+            }
+            return -1;
+        }
+
+        if (virJSONValueObjectHasKey(msg, "event"))
+            continue;
+
+        if (virJSONValueObjectGetNumberUlong(msg, "return", &rid) == 0 && rid == id)
+            return 0;
+    }
+}
+
+
+static int
+chGuestAgentOpenSocket(virDomainObj *vm)
+{
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+    struct sockaddr_un sa = { .sun_family = AF_UNIX };
+    g_autofree char *path = NULL;
+    int fd;
+
+    if (!vm->def->vsock) {
+        virReportError(VIR_ERR_ARGUMENT_UNSUPPORTED, "%s",
+                       _("guest agent requires a configured vsock device"));
+        return -1;
+    }
+
+    cfg = virCHDriverGetConfig(CH_DOMAIN_PRIVATE(vm)->driver);
+    path = g_strdup_printf("%s/%s-vsock", cfg->stateDir, vm->def->name);
+
+    if (virStrcpyStatic(sa.sun_path, path) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       _("UNIX socket path '%1$s' too long"),
+                       path);
+        return -1;
+    }
+
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        virReportSystemError(errno, "%s",
+                             _("Unable to open the guest agent vsock socket"));
+        return -1;
+    }
+
+    if (connect(fd, (struct sockaddr *) &sa, sizeof(sa)) < 0) {
+        virReportSystemError(errno,
+                             _("Unable to connect to guest agent socket '%1$s'"),
+                             path);
+        VIR_FORCE_CLOSE(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+
+static int
+chGuestAgentArbitraryCommand(virDomainObj *vm,
+                             const char *cmdstr,
+                             int timeout,
+                             char **result)
+{
+    VIR_AUTOCLOSE fd = -1;
+    g_autofree char *buffer = g_strdup("");
+    size_t buflen = 0;
+    g_autofree char *wirecmd = NULL;
+    g_autoptr(virJSONValue) cmd = NULL;
+    g_autoptr(virJSONValue) reply = NULL;
+    int timeoutms;
+
+    *result = NULL;
+
+    if (timeout < VIR_DOMAIN_QEMU_AGENT_COMMAND_MIN) {
+        virReportError(VIR_ERR_INVALID_ARG,
+                       _("guest agent timeout '%1$d' is less than the minimum '%2$d'"),
+                       timeout, VIR_DOMAIN_QEMU_AGENT_COMMAND_MIN);
+        return -1;
+    }
+
+    if (!(cmd = virJSONValueFromString(cmdstr)))
+        return -1;
+
+    if ((fd = chGuestAgentOpenSocket(vm)) < 0)
+        return -1;
+
+    if (timeout != VIR_DOMAIN_QEMU_AGENT_COMMAND_NOWAIT &&
+        chGuestAgentSync(fd, timeout, &buffer, &buflen) < 0)
+        return -1;
+
+    wirecmd = g_strdup_printf("%s\n", cmdstr);
+    if (chGuestAgentSendAll(fd, wirecmd, strlen(wirecmd)) < 0)
+        return -1;
+
+    if (timeout == VIR_DOMAIN_QEMU_AGENT_COMMAND_NOWAIT) {
+        *result = g_strdup("");
+        return 0;
+    }
+
+    timeoutms = chGuestAgentTimeoutToMS(timeout);
+
+    while (true) {
+        g_clear_pointer(&reply, virJSONValueFree);
+
+        if (chGuestAgentRecvMessage(fd, timeoutms, &buffer, &buflen, &reply) < 0)
+            return -1;
+
+        if (virJSONValueObjectHasKey(reply, "event"))
+            continue;
+
+        if (chGuestAgentCheckReply(cmd, reply) < 0)
+            return -1;
+
+        if (!(*result = virJSONValueToString(reply, false)))
+            return -1;
+
+        return 0;
+    }
 }
 
 
@@ -2860,6 +3272,42 @@ chDomainInterfaceAddresses(virDomain *dom,
     return ret;
 }
 
+static char *
+chDomainQemuAgentCommand(virDomainPtr domain,
+                         const char *cmd,
+                         int timeout,
+                         unsigned int flags)
+{
+    virDomainObj *vm = NULL;
+    char *result = NULL;
+
+    virCheckFlags(0, NULL);
+
+    if (!(vm = virCHDomainObjFromDomain(domain)))
+        goto cleanup;
+
+    if (virDomainQemuAgentCommandEnsureACL(domain->conn, vm->def) < 0)
+        goto cleanup;
+
+    if (virDomainObjBeginAgentJob(vm, VIR_AGENT_JOB_MODIFY) < 0)
+        goto cleanup;
+
+    if (virDomainObjCheckActive(vm) < 0)
+        goto endjob;
+
+    if (chGuestAgentArbitraryCommand(vm, cmd, timeout, &result) < 0)
+        goto endjob;
+
+    virDomainObjTaint(vm, VIR_DOMAIN_TAINT_CUSTOM_GA_COMMAND);
+
+ endjob:
+    virDomainObjEndAgentJob(vm);
+
+ cleanup:
+    virDomainObjEndAPI(&vm);
+    return result;
+}
+
 /*******************************************************************
  * Migration Protocol Version 3
  *******************************************************************/
@@ -5390,6 +5838,7 @@ static virHypervisorDriver chHypervisorDriver = {
     .connectDomainEventRegisterAny = chConnectDomainEventRegisterAny,       /* 10.10.0 */
     .connectDomainEventDeregisterAny = chConnectDomainEventDeregisterAny,   /* 10.10.0 */
     .domainInterfaceAddresses = chDomainInterfaceAddresses, /* 11.0.0 */
+    .domainQemuAgentCommand = chDomainQemuAgentCommand,     /* 12.5.0 */
     .domainMigrateBegin3 = chDomainMigrateBegin3, /* 11.4.0 */
     .domainMigrateBegin3Params = chDomainMigrateBegin3Params, /* 11.4.0 */
     .domainMigratePrepare3 = chDomainMigratePrepare3, /* 11.4.0 */
