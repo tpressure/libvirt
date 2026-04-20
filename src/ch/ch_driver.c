@@ -341,6 +341,9 @@ chGuestAgentRecvMessage(int fd,
             if (payload[0] == '\0')
                 continue;
 
+            if (STRPREFIX(payload, "OK "))
+                continue;
+
             if (!(*msg = virJSONValueFromString(payload)))
                 return -1;
 
