@@ -368,7 +368,7 @@ chGuestAgentRecvMessage(int fd,
             } while (got < 0 && errno == EINTR);
 
             if (got < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                if (errno == EAGAIN) //XXX: we should probably retry instead
                     break;
 
                 virReportSystemError(errno, "%s",
