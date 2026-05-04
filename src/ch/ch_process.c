@@ -509,7 +509,7 @@ virCHProcessSetup(virDomainObj *vm)
  *
  * Returns socket fd on success, -1 on error
  */
-static int
+int
 chMonitorSocketConnect(virCHMonitor *mon)
 {
     struct sockaddr_un server_addr = { };
@@ -766,6 +766,8 @@ chProcessAddNetworkDevices(virCHDriver *driver,
         int saved_errno;
         int rc;
 
+        // This is set to 0 in domain_conf.c always. Figure out how to
+        // handle this properly!
         if (vmdef->nets[i]->driver.virtio.queues == 0) {
             /* "queues" here refers to queue pairs. When 0, initialize
              * queue pairs to 1.
@@ -849,6 +851,15 @@ virCHRestoreCreateNetworkDevices(virCHDriver *driver,
     size_t index_vmtapfds;
     for (i = 0; i < vmdef->nnets; i++) {
         g_autofree int *tapfds = NULL;
+
+        // This is set to 0 in domain_conf.c always. Figure out how to
+        // handle this properly!
+        if (vmdef->nets[i]->driver.virtio.queues == 0) {
+            /* "queues" here refers to queue pairs. When 0, initialize
+             * queue pairs to 1.
+             */
+            vmdef->nets[i]->driver.virtio.queues = 1;
+        }
         tapfd_len = vmdef->nets[i]->driver.virtio.queues;
         if (virCHDomainValidateActualNetDef(vmdef->nets[i]) < 0) {
             virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
@@ -1089,10 +1100,14 @@ virCHProcessStart(virCHDriver *driver,
         goto cleanup;
     }
 
+    virInhibitorHold(driver->inhibitor);
+
     if (virCHProcessSetup(vm) < 0)
         goto cleanup;
 
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, reason);
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
 
     return 0;
 
@@ -1126,6 +1141,10 @@ virCHProcessStop(virCHDriver *driver,
         virProcessAbort(vm->pid);
         g_clear_pointer(&priv->monitor, virCHMonitorClose);
     }
+
+    // Release the inhibitor, which leads to virtchd shutting down after 120
+    // secs if no running domain is remaining.
+    virInhibitorRelease(driver->inhibitor);
 
     /* de-activate netdevs after stopping vm */
     ignore_value(virDomainInterfaceStopDevices(vm->def));
@@ -1207,6 +1226,13 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
         return -1;
     }
     logfile = domainLogContextGetWriteFD(logCtxt);
+
+    if (virCHProcessPrepareDomain(vm) < 0) {
+        return -1;
+    }
+
+    if (virCHProcessPrepareHost(driver, vm) < 0)
+        return -1;
 
     if (!priv->monitor) {
         /* Get the first monitor connection if not already */
