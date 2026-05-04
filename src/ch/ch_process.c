@@ -1125,6 +1125,7 @@ virCHProcessInit(virCHDriver *driver,
                                    cfg->cgroupControllers,
                                    0, /*maxThreadsPerProc*/
                                    priv->driver->privileged,
+                                   false,
                                    priv->machineName) < 0)
     {
         DBG("Failed virDomainCgroupSetupCgroup");
