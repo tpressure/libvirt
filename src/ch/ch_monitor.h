@@ -44,6 +44,7 @@
 #define URL_VM_SEND_MIGRATION "vm.send-migration"
 #define URL_VM_REMOVE_DEVICE "vm.remove-device"
 #define URL_VM_ADD_DISK "vm.add-disk"
+#define URL_VM_RESIZE_DISK "vm.resize-disk"
 
 #define VIRCH_THREAD_NAME_LEN   16
 
@@ -121,7 +122,7 @@ struct _virCHMonitor {
 virCHMonitor *virCHMonitorNew(virDomainObj *vm, virCHDriverConfig *cfg,
                               int logfile);
 virCHMonitor *
-virCHMonitorReattach(virDomainObj *vm, virCHDriverConfig *cfg);
+virCHMonitorReattach(virDomainObj *vm, virCHDriverConfig *cfg, virCHDriver *driver);
 
 void virCHMonitorClose(virCHMonitor *mon);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(virCHMonitor, virCHMonitorClose);
@@ -136,6 +137,13 @@ int virCHMonitorSuspendVM(virCHMonitor *mon);
 int virCHMonitorResumeVM(virCHMonitor *mon);
 int virCHMonitorSaveVM(virCHMonitor *mon,
                        const char *to);
+int virCHMonitorMigrationSend(virCHMonitor *mon,
+                              const char *dst_uri,
+                              unsigned parallel_connections);
+int virCHMonitorMigrationReceive(virCHMonitor *mon,
+                                 const char *rcv_uri,
+                                 virDomainDef *vmdef, virCHDriver *driver, virCond *cond, char* tcp_serial_url);
+int virCHMonitorRemoveDevice(virCHMonitor *mon, const char* device_id);
 int virCHMonitorGetInfo(virCHMonitor *mon, virJSONValue **info);
 
 size_t virCHMonitorGetThreadInfo(virCHMonitor *mon, bool refresh,
@@ -152,6 +160,9 @@ virCHMonitorBuildNetJson(virDomainNetDef *netdef,
 int virCHMonitorBuildRestoreJson(virDomainDef *vmdef,
                                  const char *from,
                                  char **jsonstr);
+bool
+virCHMonitorPutNoResponse(virCHMonitor *mon, const char *endpoint,
+                const char *payload, domainLogContext *logCtxt);
 virJSONValue*
 virCHMonitorPut(virCHMonitor *mon, const char *endpoint,
                 const char *payload, domainLogContext *logCtxt);

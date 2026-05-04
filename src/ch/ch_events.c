@@ -20,6 +20,7 @@
 
 #include <config.h>
 
+#include <poll.h>
 #include <unistd.h>
 
 #include "ch_domain.h"
@@ -211,6 +212,38 @@ virCHProcessEvents(virCHMonitor *mon)
     return 0;
 }
 
+static void
+chProcessEventSubmit(virDomainObj *vm,
+                     chProcessEventType eventType,
+                     int action,
+                     int status,
+                     void *data)
+{
+    struct chProcessEvent *event = g_new0(struct chProcessEvent, 1);
+    virCHDriver *driver = CH_DOMAIN_PRIVATE(vm)->driver;
+
+    event->vm = virObjectRef(vm);
+    event->eventType = eventType;
+    event->action = action;
+    event->status = status;
+    event->data = data;
+
+    if (virThreadPoolSendJob(driver->workerPool, 0, event) < 0) {
+        virObjectUnref(event->vm);
+        g_free(event);
+    }
+}
+
+static void
+chProcessHandleMonitorEOF(virDomainObj *vm)
+{
+    virObjectLock(vm);
+
+    chProcessEventSubmit(vm, CH_PROCESS_EVENT_MONITOR_EOF,
+                         0, 0, GINT_TO_POINTER(vm->def->id));
+    virObjectUnlock(vm);
+}
+
 static int
 virCHReadProcessEvents(virCHMonitor *mon)
 {
@@ -222,15 +255,40 @@ virCHReadProcessEvents(virCHMonitor *mon)
     virDomainObj *vm = mon->vm;
     bool incomplete = false;
     size_t sz = 0;
+    int poll_ret = 0;
     int event_monitor_fd = mon->eventmonitorfd;
+    struct pollfd fds[1];
+    fds[0].fd = event_monitor_fd;
+    fds[0].events = POLLIN | POLLHUP;
 
     memset(buf, 0, max_sz);
     do {
         ssize_t ret;
 
+        poll_ret = poll(fds, 1, G_USEC_PER_SEC);
+
+        if (poll_ret < 0) {
+            VIR_ERROR(_("%1$s: Failed to poll monitor fd!: %2$s"),
+                      vm->def->name, g_strerror(errno));
+            return -1;
+        } else if (poll_ret == 0) {
+            continue;
+        }
+
+        if (fds[0].revents & POLLHUP) {
+            VIR_WARN(_("%1$s: Sender hung up unexpectedly!"),
+                     vm->def->name);
+            chProcessHandleMonitorEOF(vm);
+            return -1;
+        }
+
+        if (!(fds[0].revents & POLLIN)) {
+            /* Nothing to read */
+            continue;
+        }
+
         ret = read(event_monitor_fd, buf + sz, max_sz - sz);
         if (ret == 0 || (ret < 0 && errno == EINTR)) {
-            g_usleep(G_USEC_PER_SEC);
             continue;
         } else if (ret < 0) {
             /* We should never reach here. read(2) says possible errors

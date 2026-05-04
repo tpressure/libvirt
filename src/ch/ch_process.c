@@ -80,6 +80,10 @@ virCHProcessUpdateConsoleDevice(virDomainObj *vm,
         vm->def->serials[0]->source->type == VIR_DOMAIN_CHR_TYPE_UNIX)
         return;
 
+    if (STREQ(device, "serial") &&
+        vm->def->serials[0]->source->type == VIR_DOMAIN_CHR_TYPE_TCP)
+        return;
+
     dev = virJSONValueObjectGet(config, device);
     if (!dev) {
         virReportError(VIR_ERR_INTERNAL_ERROR,
@@ -110,8 +114,10 @@ virCHProcessUpdateConsoleDevice(virDomainObj *vm,
         chr = vm->def->serials[0];
     }
 
-    if (chr && chr->source)
+    if (chr && chr->source) {
+        g_free(chr->source->data.file.path);
         chr->source->data.file.path = g_strdup(path);
+    }
 }
 
 static void
@@ -137,6 +143,7 @@ int
 virCHProcessUpdateInfo(virDomainObj *vm)
 {
     g_autoptr(virJSONValue) info = NULL;
+
     virCHDomainObjPrivate *priv = vm->privateData;
     if (virCHMonitorGetInfo(priv->monitor, &info) < 0)
         return -1;
@@ -161,7 +168,7 @@ virCHProcessGetAllCpuAffinity(virBitmap **cpumapRet)
 }
 
 #if defined(WITH_SCHED_GETAFFINITY) || defined(WITH_BSD_CPU_AFFINITY)
-static int
+int
 virCHProcessInitCpuAffinity(virDomainObj *vm)
 {
     g_autoptr(virBitmap) cpumapToSet = NULL;
@@ -201,7 +208,7 @@ virCHProcessInitCpuAffinity(virDomainObj *vm)
     return 0;
 }
 #else /* !defined(WITH_SCHED_GETAFFINITY) && !defined(WITH_BSD_CPU_AFFINITY) */
-static int
+int
 virCHProcessInitCpuAffinity(virDomainObj *vm G_GNUC_UNUSED)
 {
     return 0;
@@ -472,7 +479,7 @@ virCHProcessSetupVcpus(virDomainObj *vm)
     return 0;
 }
 
-static int
+int
 virCHProcessSetup(virDomainObj *vm)
 {
     virCHDomainObjPrivate *priv = vm->privateData;
@@ -545,85 +552,85 @@ chMonitorSocketConnect(virCHMonitor *mon)
 
 #define PKT_TIMEOUT_MS 500 /* ms */
 
-static char *
-chSocketRecv(int sock, bool use_timeout)
-{
-    struct pollfd pfds[1];
-    char *buf = NULL;
-    size_t buf_len = 1024;
-    int timeout = PKT_TIMEOUT_MS;
-    int ret;
+// static char *
+// chSocketRecv(int sock, bool use_timeout)
+// {
+//     struct pollfd pfds[1];
+//     char *buf = NULL;
+//     size_t buf_len = 1024;
+//     int timeout = PKT_TIMEOUT_MS;
+//     int ret;
 
-    buf = g_new0(char, buf_len);
+//     buf = g_new0(char, buf_len);
 
-    pfds[0].fd = sock;
-    pfds[0].events = POLLIN;
+//     pfds[0].fd = sock;
+//     pfds[0].events = POLLIN;
 
-    if (!use_timeout)
-        timeout = -1;
+//     if (!use_timeout)
+//         timeout = -1;
 
-    do {
-        ret = poll(pfds, G_N_ELEMENTS(pfds), timeout);
-    } while (ret < 0 && errno == EINTR);
+//     do {
+//         ret = poll(pfds, G_N_ELEMENTS(pfds), timeout);
+//     } while (ret < 0 && errno == EINTR);
 
-    if (ret <= 0) {
-        if (ret < 0) {
-            virReportSystemError(errno, _("Poll on sock %1$d failed"), sock);
-        } else if (ret == 0) {
-            virReportSystemError(errno, _("Poll on sock %1$d timed out"), sock);
-        }
-        return NULL;
-    }
+//     if (ret <= 0) {
+//         if (ret < 0) {
+//             virReportSystemError(errno, _("Poll on sock %1$d failed"), sock);
+//         } else if (ret == 0) {
+//             virReportSystemError(errno, _("Poll on sock %1$d timed out"), sock);
+//         }
+//         return NULL;
+//     }
 
-    do {
-        ret = recv(sock, buf, buf_len - 1, 0);
-    } while (ret < 0 && errno == EINTR);
+//     do {
+        // ret = recv(sock, buf, buf_len - 1, 0);
+//     } while (ret < 0 && errno == EINTR);
 
-    if (ret < 0) {
-        virReportSystemError(errno, _("recv on sock %1$d failed"), sock);
-        return NULL;
-    }
+//     if (ret < 0) {
+//         virReportSystemError(errno, _("recv on sock %1$d failed"), sock);
+//         return NULL;
+//     }
 
-    return g_steal_pointer(&buf);
-}
+//     return g_steal_pointer(&buf);
+// }
 
 #undef PKT_TIMEOUT_MS
 
-static int
-chSocketProcessHttpResponse(int sock, bool use_poll_timeout)
-{
-    g_autofree char *response = NULL;
-    int http_res;
+// static int
+// chSocketProcessHttpResponse(int sock, bool use_poll_timeout)
+// {
+//     g_autofree char *response = NULL;
+//     int http_res;
 
-    response = chSocketRecv(sock, use_poll_timeout);
-    if (response == NULL) {
-        return -1;
-    }
+//     response = chSocketRecv(sock, use_poll_timeout);
+//     if (response == NULL) {
+//         return -1;
+//     }
 
-    /* Parse the HTTP response code */
-    if (sscanf(response, "HTTP/1.%*d %d", &http_res) != 1) {
-        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
-                        _("Failed to parse HTTP response code"));
-        return -1;
-    }
-    if (http_res != 204 && http_res != 200) {
-        virReportError(VIR_ERR_INTERNAL_ERROR,
-                        _("Unexpected response from CH: %1$s"), response);
-        return -1;
-    }
+//     /* Parse the HTTP response code */
+//     if (sscanf(response, "HTTP/1.%*d %d", &http_res) != 1) {
+//         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+//                         _("Failed to parse HTTP response code"));
+//         return -1;
+//     }
+//     if (http_res != 204 && http_res != 200) {
+//         virReportError(VIR_ERR_INTERNAL_ERROR,
+//                         _("Unexpected response from CH: %1$s"), response);
+//         return -1;
+//     }
 
-    return 0;
-}
+//     return 0;
+// }
 
-static int
-chCloseFDs(int *fds, size_t nfds)
-{
-    size_t i;
-    for (i = 0; i < nfds; i++) {
-        VIR_FORCE_CLOSE(fds[i]);
-    }
-    return 0;
-}
+// static int
+// chCloseFDs(int *fds, size_t nfds)
+// {
+//     size_t i;
+//     for (i = 0; i < nfds; i++) {
+//         VIR_FORCE_CLOSE(fds[i]);
+//     }
+//     return 0;
+// }
 
 int
 chProcessAddNetworkDevice(virCHDriver *driver,
@@ -636,11 +643,13 @@ chProcessAddNetworkDevice(virCHDriver *driver,
     g_auto(virBuffer) http_headers = VIR_BUFFER_INITIALIZER;
     g_autofree int *tapfds = NULL;
     g_autofree char *payload = NULL;
+    g_autofree char *netJson = NULL;
     g_autofree char *response = NULL;
     g_autofree int *nicindexes = NULL;
     size_t nnicindexes = 0;
     size_t tapfd_len;
     size_t payload_len;
+    size_t new_net_id = 0;
     int saved_errno;
     int rc;
 
@@ -651,7 +660,7 @@ chProcessAddNetworkDevice(virCHDriver *driver,
     }
 
     if ((mon_sockfd = chMonitorSocketConnect(mon)) < 0) {
-        VIR_WARN("chProcessAddNetworkDevices failed");
+        DBG("chProcessAddNetworkDevices failed");
         return -1;
     }
 
@@ -671,7 +680,7 @@ chProcessAddNetworkDevice(virCHDriver *driver,
     if (virCHDomainValidateActualNetDef(net) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                         _("net definition failed validation"));
-        VIR_WARN("virCHDomainValidateActualNetDef failed.");
+        DBG("virCHDomainValidateActualNetDef failed.");
         return -1;
     }
 
@@ -681,22 +690,23 @@ chProcessAddNetworkDevice(virCHDriver *driver,
     /* Connect Guest interfaces */
     if (virCHConnetNetworkInterfaces(driver, vmdef, net, tapfds,
                                      &nicindexes, &nnicindexes) < 0) {
-        VIR_WARN("chProcessAddNetworkDevices failed.");
+        DBG("chProcessAddNetworkDevices failed.");
         return -1;
     }
 
-    if (virCHMonitorBuildNetJson(net, vmdef->nnets, &payload) < 0) {
+    new_net_id = vmdef->nnets - 1; // IDs start at 0
+    if (virCHMonitorBuildNetJson(net, new_net_id, &netJson) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                         _("Failed to build net json"));
-        VIR_WARN("virCHMonitorBuildNetJson failed.");
+        DBG("virCHMonitorBuildNetJson failed.");
         return -1;
     }
 
-    VIR_WARN("payload sent with net-add request to CH = %s", payload);
+    DBG("payload sent with net-add request to CH = %s", netJson);
 
     virBufferAsprintf(&buf, "%s", virBufferCurrentContent(&http_headers));
-    virBufferAsprintf(&buf, "Content-Length: %zu\r\n\r\n", strlen(payload));
-    virBufferAsprintf(&buf, "%s", payload);
+    virBufferAsprintf(&buf, "Content-Length: %zu\r\n\r\n", strlen(netJson));
+    virBufferAsprintf(&buf, "%s", netJson);
     payload_len = virBufferUse(&buf);
     payload = virBufferContentAndReset(&buf);
 
@@ -750,8 +760,10 @@ chProcessAddNetworkDevices(virCHDriver *driver,
         return -1;
     }
 
-    if ((mon_sockfd = chMonitorSocketConnect(mon)) < 0)
+    if ((mon_sockfd = chMonitorSocketConnect(mon)) < 0) {
+        DBG("chProcessAddNetworkDevices failed");
         return -1;
+    }
 
     virBufferAddLit(&http_headers, "PUT /api/v1/vm.add-net HTTP/1.1\r\n");
     virBufferAddLit(&http_headers, "Host: localhost\r\n");
@@ -760,6 +772,7 @@ chProcessAddNetworkDevices(virCHDriver *driver,
     for (i = 0; i < vmdef->nnets; i++) {
         g_autofree int *tapfds = NULL;
         g_autofree char *payload = NULL;
+        g_autofree char *netJson = NULL;
         g_autofree char *response = NULL;
         size_t tapfd_len;
         size_t payload_len;
@@ -779,6 +792,7 @@ chProcessAddNetworkDevices(virCHDriver *driver,
         if (virCHDomainValidateActualNetDef(vmdef->nets[i]) < 0) {
             virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                            _("net definition failed validation"));
+            DBG("virCHDomainValidateActualNetDef failed.");
             return -1;
         }
 
@@ -787,20 +801,23 @@ chProcessAddNetworkDevices(virCHDriver *driver,
 
         /* Connect Guest interfaces */
         if (virCHConnetNetworkInterfaces(driver, vmdef, vmdef->nets[i], tapfds,
-                                         nicindexes, nnicindexes) < 0)
-            return -1;
-
-        if (virCHMonitorBuildNetJson(vmdef->nets[i], i, &payload) < 0) {
-            virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
-                           _("Failed to build net json"));
+                                         nicindexes, nnicindexes) < 0) {
+            DBG("chProcessAddNetworkDevices failed.");
             return -1;
         }
 
-        VIR_WARN("payload sent with net-add request to CH = %s", payload);
+        if (virCHMonitorBuildNetJson(vmdef->nets[i], i, &netJson) < 0) {
+            virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                           _("Failed to build net json"));
+            DBG("virCHMonitorBuildNetJson failed.");
+            return -1;
+        }
+
+        DBG("payload sent with net-add request to CH = %s", netJson);
 
         virBufferAsprintf(&buf, "%s", virBufferCurrentContent(&http_headers));
-        virBufferAsprintf(&buf, "Content-Length: %zu\r\n\r\n", strlen(payload));
-        virBufferAsprintf(&buf, "%s", payload);
+        virBufferAsprintf(&buf, "Content-Length: %zu\r\n\r\n", strlen(netJson));
+        virBufferAsprintf(&buf, "%s", netJson);
         payload_len = virBufferUse(&buf);
         payload = virBufferContentAndReset(&buf);
 
@@ -993,13 +1010,128 @@ virCHProcessPrepareHost(virCHDriver *driver, virDomainObj *vm)
 static int
 virCHProcessPrepareDomain(virDomainObj *vm)
 {
+    virCHDomainObjPrivate *priv = vm->privateData;
+
     if (virCHProcessPrepareDomainHostdevs(vm) < 0)
         return -1;
 
     if (chAssignDeviceAliases(vm->def) < 0)
         return -1;
 
+    g_atomic_int_set(&priv->shutdown_done, 0);
+
     return 0;
+}
+
+int virCHProcessInitNetwork(virCHDriver *driver,
+                            virDomainObj *vm)
+{
+    int ret = -1;
+    virCHDomainObjPrivate *priv = vm->privateData;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(priv->driver);
+    g_autofree int *nicindexes = NULL;
+    size_t nnicindexes = 0;
+
+    if (chProcessAddNetworkDevices(driver, priv->monitor, vm->def,
+                                   &nicindexes, &nnicindexes) < 0) {
+        DBG("Failed chProcessAddNetworkDevices");
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed while adding guest interfaces"));
+        goto cleanup;
+    }
+
+    /* Bring up netdevs before starting CPUs */
+    if (virDomainInterfaceStartDevices(vm->def) < 0) {
+        DBG("Failed virDomainInterfaceStartDevices");
+        return -1;
+    }
+
+    return 0;
+
+ cleanup:
+
+    return ret;
+}
+
+/**
+ * A variant of virCHProcessStart that does not start the vCPU threads and the
+ * VM. Sets up the CH process along most configuration.
+ * Is used to setup CH in order to receive a live migration afterwards.
+ */
+int
+virCHProcessInit(virCHDriver *driver,
+                 virDomainObj *vm)
+{
+    int ret = -1;
+    virCHDomainObjPrivate *priv = vm->privateData;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(priv->driver);
+    g_autofree int *nicindexes = NULL;
+    size_t nnicindexes = 0;
+    g_autoptr(domainLogContext) logCtxt = NULL;
+    int logfile = -1;
+
+    if (virDomainObjIsActive(vm)) {
+        virReportError(VIR_ERR_OPERATION_INVALID, "%s",
+                       _("VM is already active"));
+        return -1;
+    }
+
+    if (virCHProcessStartValidate(driver, vm) < 0) {
+        return -1;
+    }
+
+    DBG("Creating domain log file for %s domain", vm->def->name);
+    if (!(logCtxt = domainLogContextNew(cfg->stdioLogD, cfg->logDir,
+                                        CH_DRIVER_NAME,
+                                        vm, driver->privileged,
+                                        vm->def->name))) {
+        virLastErrorPrefixMessage("%s", _("can't connect to virtlogd"));
+        return -1;
+    }
+    logfile = domainLogContextGetWriteFD(logCtxt);
+
+    if (virCHProcessPrepareDomain(vm) < 0) {
+        return -1;
+    }
+
+    if (virCHProcessPrepareHost(driver, vm) < 0)
+        return -1;
+
+    if (!priv->monitor) {
+        /* And we can get the first monitor connection now too */
+        if (!(priv->monitor = virCHProcessConnectMonitor(driver, vm, logfile))) {
+            virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                           _("failed to create connection to CH socket"));
+            goto cleanup;
+        }
+    }
+
+    virInhibitorHold(driver->inhibitor);
+
+    vm->def->id = vm->pid;
+    priv->machineName = virCHDomainGetMachineName(vm);
+
+    if (virDomainCgroupSetupCgroup("ch", vm,
+                                   nnicindexes, nicindexes,
+                                   &priv->cgroup,
+                                   cfg->cgroupControllers,
+                                   0, /*maxThreadsPerProc*/
+                                   priv->driver->privileged,
+                                   priv->machineName) < 0)
+    {
+        DBG("Failed virDomainCgroupSetupCgroup");
+        goto cleanup;
+    }
+
+    virDomainObjSetState(vm, VIR_DOMAIN_PAUSED, VIR_DOMAIN_PAUSED_MIGRATION);
+
+    return 0;
+
+ cleanup:
+    if (ret)
+        virCHProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_FAILED);
+
+    return ret;
 }
 
 /**
@@ -1034,6 +1166,9 @@ virCHProcessStart(virCHDriver *driver,
     if (virCHProcessStartValidate(driver, vm) < 0) {
         return -1;
     }
+
+    if (virDomainObjSetDefTransient(driver->xmlopt, vm, NULL) < 0)
+        return -1;
 
     VIR_DEBUG("Creating domain log file for %s domain", vm->def->name);
     if (!(logCtxt = domainLogContextNew(cfg->stdioLogD, cfg->logDir,
@@ -1107,7 +1242,7 @@ virCHProcessStart(virCHDriver *driver,
 
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, reason);
     if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
-        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+        DBG("Failed to save status on vm %s", vm->def->name);
 
     return 0;
 
@@ -1118,10 +1253,11 @@ virCHProcessStart(virCHDriver *driver,
     return ret;
 }
 
-int
-virCHProcessStop(virCHDriver *driver,
+static int
+virCHProcessStopOrKill(virCHDriver *driver,
                  virDomainObj *vm,
-                 virDomainShutoffReason reason)
+                 virDomainShutoffReason reason,
+                 bool kill)
 {
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret;
@@ -1132,13 +1268,20 @@ virCHProcessStop(virCHDriver *driver,
     virErrorPtr orig_err = NULL;
     size_t i;
 
+    // A shutdown might be already on-going e.g. because an event triggered it.
+    // Do not do it twice in this case.
+    if (g_atomic_int_exchange(&priv->shutdown_done, 1) == 1) {
+        DBG("Shutdown already in progress or done");
+        return 0;
+    }
+
     VIR_DEBUG("Stopping VM name=%s pid=%d reason=%d",
               vm->def->name, (int)vm->pid, (int)reason);
 
     virErrorPreserveLast(&orig_err);
 
     if (priv->monitor) {
-        virProcessAbort(vm->pid);
+        virProcessKill(vm->pid, kill ? SIGKILL : SIGTERM);
         g_clear_pointer(&priv->monitor, virCHMonitorClose);
     }
 
@@ -1184,8 +1327,28 @@ virCHProcessStop(virCHDriver *driver,
     virHostdevReAttachDomainDevices(driver->hostdevMgr, CH_DRIVER_NAME, def,
                                     hostdev_flags);
 
+    virDomainObjRemoveTransientDef(vm);
+
+    ignore_value(virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm));
+
     virErrorRestore(&orig_err);
     return 0;
+}
+
+int
+virCHProcessKill(virCHDriver *driver,
+                 virDomainObj *vm,
+                 virDomainShutoffReason reason)
+{
+    return virCHProcessStopOrKill(driver, vm, reason, true);
+}
+
+int
+virCHProcessStop(virCHDriver *driver,
+                 virDomainObj *vm,
+                 virDomainShutoffReason reason)
+{
+    return virCHProcessStopOrKill(driver, vm, reason, false);
 }
 
 /**
@@ -1206,6 +1369,7 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
     g_auto(virBuffer) buf = VIR_BUFFER_INITIALIZER;
     g_auto(virBuffer) http_headers = VIR_BUFFER_INITIALIZER;
     g_autofree char *payload = NULL;
+    g_autofree char *restoreJson = NULL;
     g_autofree char *response = NULL;
     VIR_AUTOCLOSE mon_sockfd = -1;
     g_autofree int *tapfds = NULL;
@@ -1246,7 +1410,7 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
     vm->def->id = vm->pid;
     priv->machineName = virCHDomainGetMachineName(vm);
 
-    if (virCHMonitorBuildRestoreJson(vm->def, from, &payload) < 0) {
+    if (virCHMonitorBuildRestoreJson(vm->def, from, &restoreJson) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                        _("failed to restore domain"));
         goto cleanup;
@@ -1256,8 +1420,8 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
     virBufferAddLit(&http_headers, "Host: localhost\r\n");
     virBufferAddLit(&http_headers, "Content-Type: application/json\r\n");
     virBufferAsprintf(&buf, "%s", virBufferCurrentContent(&http_headers));
-    virBufferAsprintf(&buf, "Content-Length: %zu\r\n\r\n", strlen(payload));
-    virBufferAsprintf(&buf, "%s", payload);
+    virBufferAsprintf(&buf, "Content-Length: %zu\r\n\r\n", strlen(restoreJson));
+    virBufferAsprintf(&buf, "%s", restoreJson);
     payload_len = virBufferUse(&buf);
     payload = virBufferContentAndReset(&buf);
 

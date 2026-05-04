@@ -20,6 +20,7 @@
 
 #include <config.h>
 
+#include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -31,6 +32,7 @@
 #include "ch_events.h"
 #include "ch_interface.h"
 #include "ch_monitor.h"
+#include "ch_socket.h"
 #include "domain_interface.h"
 #include "viralloc.h"
 #include "vircommand.h"
@@ -109,7 +111,7 @@ virCHMonitorBuildCPUJson(virJSONValue *content, virDomainDef *vmdef)
         if (virJSONValueObjectAppendNumberInt(cpus, "max_vcpus", vmdef->maxvcpus) < 0)
             return -1;
         if (virCHMonitorBuildCPUTopologyJson(topology, vmdef) == 0) {
-            VIR_WARN("Using CPU topology: %d:%d:%d:%d", vmdef->cpu->sockets, vmdef->cpu->dies, vmdef->cpu->cores, vmdef->cpu->threads);
+            DBG("Using CPU topology: %d:%d:%d:%d", vmdef->cpu->sockets, vmdef->cpu->dies, vmdef->cpu->cores, vmdef->cpu->threads);
             if (virJSONValueObjectAppend(cpus, "topology", &topology) < 0)
                 return -1;
         }
@@ -211,6 +213,27 @@ virCHMonitorBuildConsoleJson(virJSONValue *content,
                                                "socket",
                                                vmdef->serials[0]->source->data.file.path) < 0)
                 return -1;
+        } else if (vmdef->serials[0]->source->type == VIR_DOMAIN_CHR_TYPE_FILE) {
+            if (virJSONValueObjectAppendString(serial, "mode", "File") < 0)
+                return -1;
+            if (virJSONValueObjectAppendString(serial,
+                                               "file",
+                                               vmdef->serials[0]->source->data.file.path) < 0)
+                return -1;
+        } else if (vmdef->serials[0]->source->type == VIR_DOMAIN_CHR_TYPE_TCP) {
+            g_autofree char *url = g_strdup_printf("%s:%s",
+                                                   vmdef->serials[0]->source->data.tcp.host,
+                                                   vmdef->serials[0]->source->data.tcp.service);
+            if (virJSONValueObjectAppendString(serial, "mode", "Tcp") < 0)
+                return -1;
+            if (virJSONValueObjectAppendString(serial, "url", url) < 0)
+                return -1;
+            if (vmdef->serials[0]->source->logfile) {
+                if (virJSONValueObjectAppendString(serial,
+                                                   "file",
+                                                   vmdef->serials[0]->source->logfile) < 0)
+                    return -1;
+            }
         }
 
         if (virJSONValueObjectAppend(content, "serial", &serial) < 0)
@@ -308,15 +331,15 @@ virCHMonitorBuildKernelRelatedJson(virJSONValue *content, virDomainDef *vmdef)
     return 0;
 }
 
-static int virCHMonitorBuildHugePageJson(virJSONValue *content, size_t size, bool prefault)
+static void virCHMonitorBuildHugePageJson(virJSONValue *content, size_t size, bool prefault)
 {
-    VIR_WARN("hugepage: size=%ld", size);
+    DBG("hugepage: size=%ld", size);
 
     virJSONValueObjectAppendBoolean(content, "hugepages", true);
     virJSONValueObjectAppendNumberInt(content, "hugepage_size", size);
 
     if (prefault) {
-        VIR_WARN("hugepage: prefaulting has been requested");
+        DBG("hugepage: prefaulting has been requested");
         virJSONValueObjectAppendBoolean(content, "prefault", true);
     }
 }
@@ -337,7 +360,7 @@ virCHMonitorBuildMemoryZonesJson(virJSONValue *content, virDomainDef *def)
     size_t i = 0;
     g_autoptr(virJSONValue) zones = virJSONValueNewArray();
 
-    VIR_WARN("Found NUMA cell configuration. Creating %ld NUMA nodes for guest VM.", ncells);
+    DBG("Found NUMA cell configuration. Creating %ld NUMA nodes for guest VM.", ncells);
 
     for (i = 0; i < ncells; i++) {
         g_autofree char *id = g_strdup_printf("zone%zu", i);
@@ -350,8 +373,8 @@ virCHMonitorBuildMemoryZonesJson(virJSONValue *content, virDomainDef *def)
         size_t hostNode = virBitmapLastSetBit(nodes);
 
         if (hostNodeCount > 1) {
-            VIR_WARN("There are %ld host nodes specified but Cloud Hypervisor only supports 1", hostNodeCount);
-            VIR_WARN("The host node mapping is dropped.");
+            DBG("There are %ld host nodes specified but Cloud Hypervisor only supports 1", hostNodeCount);
+            DBG("The host node mapping is dropped.");
         }
 
         if (virJSONValueObjectAppendString(zone, "id", id) < 0)
@@ -361,14 +384,14 @@ virCHMonitorBuildMemoryZonesJson(virJSONValue *content, virDomainDef *def)
             return -1;
 
         if (hostNodeCount == 1) {
-            VIR_WARN("Associating guest node %lu with host node %s", i , nodeset);
+            DBG("Associating guest node %lu with host node %s", i , nodeset);
 
             if (virJSONValueObjectAppendNumberUlong(zone, "host_numa_node", hostNode) < 0)
                 return -1;
         }
 
         if (def->mem.nhugepages) {
-            VIR_WARN("hugepage: found %ld definitions", def->mem.nhugepages);
+            DBG("hugepage: found %ld definitions", def->mem.nhugepages);
             for (unsigned j=0; j<def->mem.nhugepages; ++j) {
                 size_t size = def->mem.hugepages[j].size * 1024;
                 bool prefault = def->mem.allocation == VIR_DOMAIN_MEMORY_ALLOCATION_IMMEDIATE;
@@ -379,7 +402,7 @@ virCHMonitorBuildMemoryZonesJson(virJSONValue *content, virDomainDef *def)
                         break;
                     }
                 } else {
-                    VIR_WARN("hugepage: applying default definition");
+                    DBG("hugepage: applying default definition");
                     virCHMonitorBuildHugePageJson(zone, size, prefault);
                 }
             }
@@ -566,11 +589,20 @@ virCHMonitorBuildNetJson(virDomainNetDef *net,
     g_autoptr(virJSONValue) net_json = virJSONValueNewObject();
     virDomainNetType actualType = virDomainNetGetActualType(net);
 
+    // TODO switch to chAssignDeviceNetAlias from ch_alias.c
     g_autofree char *id = g_strdup_printf("%s_%d", CH_NET_ID_PREFIX, netindex);
     if (virJSONValueObjectAppendString(net_json, "id", id) < 0)
         return -1;
 
     net->info.alias = g_strdup_printf("%s", id);
+
+    // Populate the <interface type="pci"> XML tag, relevant for OpenStack
+    // Currently not needed to have sane values here.
+	net->info.type = VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI;
+    net->info.addr.pci.bus = 0;
+    assert(netindex <= 7);
+    net->info.addr.pci.slot = netindex + 1;
+    net->info.addr.pci.function = 0;
 
     if (actualType == VIR_DOMAIN_NET_TYPE_ETHERNET &&
         net->guestIP.nips == 1) {
@@ -737,7 +769,7 @@ virCHMonitorBuildVMJson(virCHDriver *driver, virDomainDef *vmdef,
         return -1;
 
     if (virCHMonitorBuildNumaJson(content, vmdef) < 0) {
-        VIR_WARN("Failed building NUMA json");
+        DBG("Failed building NUMA json");
         return -1;
     }
 
@@ -763,6 +795,7 @@ virCHMonitorBuildVMJson(virCHDriver *driver, virDomainDef *vmdef,
     if (!(*jsonstr = virJSONValueToString(content, false)))
         return -1;
 
+    VIR_DEBUG("Build VM JSON: \n %s \n", *jsonstr);
     return 0;
 }
 
@@ -838,7 +871,7 @@ chMonitorCreateSocket(const char *socket_path)
 }
 
 virCHMonitor *
-virCHMonitorReattach(virDomainObj *vm, virCHDriverConfig *cfg)
+virCHMonitorReattach(virDomainObj *vm, virCHDriverConfig *cfg, virCHDriver *driver)
 {
     // virCHDomainObjPrivate *priv = vm->privateData;
     g_autoptr(virCHMonitor) mon = NULL;
@@ -916,6 +949,8 @@ virCHMonitorReattach(virDomainObj *vm, virCHDriverConfig *cfg)
     /* get a curl handle */
     mon->handle = curl_easy_init();
 
+    virInhibitorHold(driver->inhibitor);
+
     return g_steal_pointer(&mon);
 }
 
@@ -981,6 +1016,8 @@ virCHMonitorNew(virDomainObj *vm, virCHDriverConfig *cfg, int logfile)
         return NULL;
     }
 
+    VIR_DEBUG("Start emulator with cmd: %s", vm->def->emulator);
+
     cmd = virCommandNew(vm->def->emulator);
     virCommandSetOutputFD(cmd, &logfile);
     virCommandSetErrorFD(cmd, &logfile);
@@ -1000,7 +1037,7 @@ virCHMonitorNew(virDomainObj *vm, virCHDriverConfig *cfg, int logfile)
     virCommandPassFD(cmd, socket_fd, VIR_COMMAND_PASS_FD_CLOSE_PARENT);
     virCommandAddArg(cmd, "-v");
     virCommandAddArg(cmd, "--seccomp");
-    virCommandAddArg(cmd, "log");
+    virCommandAddArg(cmd, "true");
     virCommandAddArg(cmd, "--event-monitor");
     virCommandAddArgFormat(cmd, "path=%s", mon->eventmonitorpath);
     virCommandSetPidFile(cmd, priv->pidfile);
@@ -1179,27 +1216,78 @@ virCHMonitorPutNoContent(virCHMonitor *mon, const char *endpoint,
     curl_easy_setopt(mon->handle, CURLOPT_WRITEFUNCTION, curl_callback);
     curl_easy_setopt(mon->handle, CURLOPT_WRITEDATA, (void *)&data);
 
-    VIR_WARN("curl perform");
     responseCode = virCHMonitorCurlPerform(mon->handle);
-    VIR_WARN("done");
+
+    data.content = g_realloc(data.content, data.size + 1 /* NULL */);
+    data.content[data.size] = 0;
 
     if (logCtxt && data.size) {
-        /* Do this to append a NULL char at the end of data */
-        data.content = g_realloc(data.content, data.size + 1);
-        data.content[data.size] = 0;
         domainLogContextWrite(logCtxt, "HTTP response code from CH: %d\n", responseCode);
         domainLogContextWrite(logCtxt, "Response = %s\n", data.content);
     }
-    data.content = g_realloc(data.content, data.size + 1);
-    data.content[data.size] = 0;
-    VIR_WARN("HTTP Response: %s", data.content);
+
+    if (data.size) {
+        DBG("HTTP Response: %s", data.content);
+    }
 
     if (responseCode == 200 || responseCode == 204)
         ret = 0;
 
     curl_slist_free_all(headers);
-
+    g_free(data.content);
     return ret;
+}
+
+bool
+virCHMonitorPutNoResponse(virCHMonitor *mon, const char *endpoint,
+                const char *payload, domainLogContext *logCtxt)
+{
+    VIR_LOCK_GUARD lock = virObjectLockGuard(mon);
+    g_autofree char *url = NULL;
+    int responseCode = 0;
+    struct curl_data data = {0};
+    struct curl_slist *headers = NULL;
+
+    url = g_strdup_printf("%s/%s", URL_ROOT, endpoint);
+
+    /* reset all options of a libcurl session handle at first */
+    curl_easy_reset(mon->handle);
+
+    curl_easy_setopt(mon->handle, CURLOPT_UNIX_SOCKET_PATH, mon->socketpath);
+    curl_easy_setopt(mon->handle, CURLOPT_URL, url);
+    curl_easy_setopt(mon->handle, CURLOPT_UPLOAD, 1L);
+    curl_easy_setopt(mon->handle, CURLOPT_HTTPHEADER, NULL);
+    curl_easy_setopt(mon->handle, CURLOPT_INFILESIZE, 0L);
+
+    headers = curl_slist_append(headers, "Accept: application/json");
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    curl_easy_setopt(mon->handle, CURLOPT_CUSTOMREQUEST, "PUT");
+    curl_easy_setopt(mon->handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(mon->handle, CURLOPT_POSTFIELDS, payload);
+    curl_easy_setopt(mon->handle, CURLOPT_WRITEFUNCTION, curl_callback);
+    curl_easy_setopt(mon->handle, CURLOPT_WRITEDATA, (void *)&data);
+
+    responseCode = virCHMonitorCurlPerform(mon->handle);
+
+    data.content = g_realloc(data.content, data.size + 1);
+    data.content[data.size] = 0;
+
+    DBG("Reponse code from CH: %d", responseCode);
+
+    if (data.size) {
+        DBG("HTTP Response: %s", data.content);
+    }
+
+    if (logCtxt) {
+        /* Do this to append a NULL char at the end of data */
+        domainLogContextWrite(logCtxt, "HTTP response code from CH: %d\n", responseCode);
+        domainLogContextWrite(logCtxt, "Response = %s\n", data.content);
+    }
+
+    curl_slist_free_all(headers);
+    g_free(data.content);
+
+    return responseCode == 200 || responseCode == 204;
 }
 
 virJSONValue*
@@ -1237,8 +1325,12 @@ virCHMonitorPut(virCHMonitor *mon, const char *endpoint,
     data.content = g_realloc(data.content, data.size + 1);
     data.content[data.size] = 0;
 
-    VIR_WARN("Reponse code from CH: %d\n", responseCode);
-    VIR_WARN("HTTP Response: %s", data.content);
+    DBG("Reponse code from CH: %d", responseCode);
+
+    if (data.size) {
+        DBG("HTTP Response: %s", data.content);
+    }
+
     retJson = virJSONValueFromString(data.content);
 
     if (logCtxt && data.size) {
@@ -1248,6 +1340,7 @@ virCHMonitorPut(virCHMonitor *mon, const char *endpoint,
     }
 
     curl_slist_free_all(headers);
+    g_free(data.content);
 
     if (responseCode != 200 && responseCode != 204)
         return NULL;
@@ -1339,12 +1432,13 @@ virCHMonitorRefreshThreadInfo(virCHMonitor *mon)
 
         VIR_DEBUG("VM PID: %d, TID %d, COMM: %s",
                   (int)vm->pid, (int)tids[i], data);
-        if (STRPREFIX(data, "vcpu")) {
+        // Allow thread names such as "vcpu-throttle"
+        if (STRPREFIX(data, "vcpu") && !STRPREFIX(data, "vcpu-") && !STRPREFIX(data, "vcpu_")) {
             int cpuid;
             char *tmp;
 
             if (virStrToLong_i(data + 4, &tmp, 0, &cpuid) < 0) {
-                VIR_WARN("Index is not specified correctly");
+                VIR_WARN("vCPU index is not specified correctly (obtained from thread name \"%s\")", data);
                 continue;
             }
             info[i].type = virCHThreadTypeVcpu;
@@ -1521,6 +1615,380 @@ virCHMonitorSaveVM(virCHMonitor *mon,
     return ret;
 }
 
+int virCHMonitorRemoveDevice(virCHMonitor *mon,
+                             const char* device_id)
+{
+    g_autofree char *url = NULL;
+    int responseCode = 0;
+    int ret = -1;
+    g_autofree char *payload = NULL;
+    struct curl_slist *headers = NULL;
+    struct curl_data data = {0};
+
+    url = g_strdup_printf("%s/%s", URL_ROOT, URL_VM_REMOVE_DEVICE);
+
+    headers = curl_slist_append(headers, "Accept: application/json");
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    if (virCHMonitorBuildKeyValueStringJson(&payload, "id", device_id) != 0)
+        return -1;
+
+    VIR_DEBUG("Remove device id %s json %s", device_id, payload);
+
+    VIR_WITH_OBJECT_LOCK_GUARD(mon) {
+        /* reset all options of a libcurl session handle at first */
+        curl_easy_reset(mon->handle);
+
+        curl_easy_setopt(mon->handle, CURLOPT_UNIX_SOCKET_PATH, mon->socketpath);
+        curl_easy_setopt(mon->handle, CURLOPT_URL, url);
+        curl_easy_setopt(mon->handle, CURLOPT_CUSTOMREQUEST, "PUT");
+        curl_easy_setopt(mon->handle, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(mon->handle, CURLOPT_POSTFIELDS, payload);
+        curl_easy_setopt(mon->handle, CURLOPT_WRITEFUNCTION, curl_callback);
+        curl_easy_setopt(mon->handle, CURLOPT_WRITEDATA, (void *)&data);
+
+        responseCode = virCHMonitorCurlPerform(mon->handle);
+    }
+
+    if (responseCode == 200 || responseCode == 204) {
+        ret = 0;
+    } else {
+        data.content = g_realloc(data.content, data.size + 1);
+        data.content[data.size] = 0;
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       data.content);
+        g_free(data.content);
+    }
+
+    /* reset the libcurl handle to avoid leaking a stack pointer to data */
+    curl_easy_reset(mon->handle);
+    curl_slist_free_all(headers);
+    return ret;
+}
+
+int virCHMonitorMigrationSend(virCHMonitor *mon,
+                              const char *dst_uri,
+                              unsigned parallel_connections)
+{
+    g_autofree char *url = NULL;
+    int responseCode = 0;
+    int ret = -1;
+    int retries = 0;
+    g_autofree char *payload = NULL;
+    struct curl_slist *headers = NULL;
+    struct curl_data data = {0};
+    g_autoptr(virJSONValue) content = virJSONValueNewObject();
+
+    url = g_strdup_printf("%s/%s", URL_ROOT, URL_VM_SEND_MIGRATION);
+
+    headers = curl_slist_append(headers, "Accept: application/json");
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+
+    if (virJSONValueObjectAppendString(content, "destination_url", dst_uri) < 0)
+        return -1;
+
+    if (parallel_connections > 1) {
+        if (virJSONValueObjectAppendNumberInt(content, "connections", parallel_connections) != 0)
+            return -1;
+    }
+
+    if (!(payload = virJSONValueToString(content, false)))
+        return -1;
+
+    DBG("Send VM to url %s json %s", dst_uri, payload);
+
+retry:
+    VIR_WITH_OBJECT_LOCK_GUARD(mon) {
+
+        /* See qemuDomainObjEnterMonitorAsync for how qemu handles unlocking the
+         * VM in case of migration. */
+        virObjectUnlock(mon->vm);
+
+        /* reset all options of a libcurl session handle at first */
+        curl_easy_reset(mon->handle);
+
+        curl_easy_setopt(mon->handle, CURLOPT_UNIX_SOCKET_PATH, mon->socketpath);
+        curl_easy_setopt(mon->handle, CURLOPT_URL, url);
+        curl_easy_setopt(mon->handle, CURLOPT_CUSTOMREQUEST, "PUT");
+        curl_easy_setopt(mon->handle, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(mon->handle, CURLOPT_POSTFIELDS, payload);
+        curl_easy_setopt(mon->handle, CURLOPT_WRITEFUNCTION, curl_callback);
+        curl_easy_setopt(mon->handle, CURLOPT_WRITEDATA, (void *)&data);
+
+        responseCode = virCHMonitorCurlPerform(mon->handle);
+    }
+    virObjectLock(mon->vm);
+
+    if (responseCode == 200 || responseCode == 204) {
+        ret = 0;
+    } else {
+        if (retries++ < 3) {
+            DBG("Error code when sending migration. Retrying.");
+            sleep(1);
+            goto retry;
+        }
+        data.content = g_realloc(data.content, data.size + 1);
+        data.content[data.size] = 0;
+        virReportError(VIR_ERR_INTERNAL_ERROR, _("Error sending VM: '%1$s'"),
+                       data.content);
+        g_free(data.content);
+    }
+
+    /* reset the libcurl handle to avoid leaking a stack pointer to data */
+    curl_easy_reset(mon->handle);
+    curl_slist_free_all(headers);
+    return ret;
+}
+
+// Copied from ch_process.c
+static int
+chMonitorSocketConnect(virCHMonitor *mon)
+{
+    struct sockaddr_un server_addr = { };
+    int sock;
+
+    sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) {
+        virReportSystemError(errno, "%s", _("Failed to open a UNIX socket"));
+        return -1;
+    }
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sun_family = AF_UNIX;
+    if (virStrcpyStatic(server_addr.sun_path, mon->socketpath) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       _("UNIX socket path '%1$s' too long"),
+                       mon->socketpath);
+        goto error;
+    }
+
+    if (connect(sock, (struct sockaddr *)&server_addr,
+                sizeof(server_addr)) == -1) {
+        virReportSystemError(errno, "%s", _("Failed to connect to mon socket"));
+        goto error;
+    }
+
+    return sock;
+ error:
+    VIR_FORCE_CLOSE(sock);
+    return -1;
+}
+static int
+virCHRestoreCreateNetworkDevices(virCHDriver *driver,
+                                 virDomainDef *vmdef,
+                                 int **vmtapfds,
+                                 size_t *nvmtapfds,
+                                 int **nicindexes,
+                                 size_t *nnicindexes)
+{
+    size_t i, j;
+    size_t tapfd_len;
+    size_t index_vmtapfds;
+    for (i = 0; i < vmdef->nnets; i++) {
+        g_autofree int *tapfds = NULL;
+        tapfd_len = vmdef->nets[i]->driver.virtio.queues;
+        if (virCHDomainValidateActualNetDef(vmdef->nets[i]) < 0) {
+            virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                           _("net definition failed validation"));
+            return -1;
+        }
+        tapfds = g_new0(int, tapfd_len);
+        memset(tapfds, -1, (tapfd_len) * sizeof(int));
+
+        /* Connect Guest interfaces */
+        if (virCHConnetNetworkInterfaces(driver, vmdef, vmdef->nets[i], tapfds,
+                                          nicindexes, nnicindexes) < 0)
+            return -1;
+
+        index_vmtapfds = *nvmtapfds;
+        VIR_EXPAND_N(*vmtapfds, *nvmtapfds, tapfd_len);
+        for (j = 0; j < tapfd_len; j++) {
+            VIR_APPEND_ELEMENT_INPLACE(*vmtapfds, index_vmtapfds, tapfds[j]);
+        }
+    }
+    return 0;
+}
+
+int virCHMonitorMigrationReceive(virCHMonitor *mon,
+                                 const char *rcv_uri,
+                                 virDomainDef *vmdef,
+                                 virCHDriver *driver,
+                                 virCond *cond,
+                                 char *tcp_serial_url)
+{
+    size_t i = 0;
+    VIR_AUTOCLOSE mon_sockfd = -1;
+    g_autofree char *payload = NULL;
+    g_autofree char *receiveJson = NULL;
+    g_autofree char *response = NULL;
+    g_autoptr(virJSONValue) content = virJSONValueNewObject();
+    g_autofree int *tapfds = NULL;
+    g_autofree int *nicindexes = NULL;
+    size_t ntapfds = 0;
+    size_t nnicindexes = 0;
+    g_auto(virBuffer) buf = VIR_BUFFER_INITIALIZER;
+    g_auto(virBuffer) http_headers = VIR_BUFFER_INITIALIZER;
+    size_t payload_len;
+    g_autoptr(virJSONValue) net_json = NULL;
+    int rc = 0;
+
+    DBG("In virCHMonitorMigrationReceive");
+
+    if (virJSONValueObjectAppendString(content, "receiver_url", rcv_uri) < 0) {
+        DBG("virJSONValueObjectAppendString failed for receiver_url");
+        rc = -1;
+        goto err;
+    }
+
+    if (vmdef->serials[0]->source->type == VIR_DOMAIN_CHR_TYPE_TCP) {
+        DBG("TCP serial in use. Pass adapted TCP serial url: %s", tcp_serial_url);
+        if (virJSONValueObjectAppendString(content, "tcp_serial_url", tcp_serial_url) < 0) {
+            DBG("virJSONValueObjectAppendString failed for tcp_serial_url");
+            rc = -1;
+            goto err;
+        }
+    }
+
+    /* Pass the netconfig needed to restore with new netfds */
+	// TODO we need to do the same with disk devices I think!
+    if (vmdef->nnets) {
+        g_autoptr(virJSONValue) nets = virJSONValueNewArray();
+        for (i = 0; i < vmdef->nnets; i++) {
+            g_autofree char *id = NULL;
+            // This is set to 0 in domain_conf.c always. Figure out how to
+            // handle this properly!
+            if (vmdef->nets[i]->driver.virtio.queues == 0) {
+                /* "queues" here refers to queue pairs. When 0, initialize
+                * queue pairs to 1.
+                */
+                vmdef->nets[i]->driver.virtio.queues = 1;
+            }
+            net_json = virJSONValueNewObject();
+            // TODO switch to chAssignDeviceNetAlias from ch_alias.c
+            id = g_strdup_printf("%s_%zu", CH_NET_ID_PREFIX, i);
+			vmdef->nets[i]->info.alias = g_strdup_printf("%s", id);
+
+			// Populate the <interface type="pci"> XML tag, relevant for OpenStack
+			// Currently not needed to have sane values here.
+			vmdef->nets[i]->info.type = VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI;
+			vmdef->nets[i]->info.addr.pci.bus = 0;
+			assert(i <= 7);
+			vmdef->nets[i]->info.addr.pci.slot = i + 1;
+			vmdef->nets[i]->info.addr.pci.function = 0;
+
+            if (virJSONValueObjectAppendString(net_json, "id", id) < 0) {
+                DBG("virJSONValueObjectAppendString failed for id");
+                rc = -1;
+                goto err;
+            }
+            if (virJSONValueObjectAppendNumberInt(net_json, "num_fds", vmdef->nets[i]->driver.virtio.queues)) {
+                DBG("virJSONValueObjectAppendNumberInt failed for num_fds");
+                rc = -1;
+                goto err;
+            }
+            if (virJSONValueArrayAppend(nets, &net_json) < 0) {
+                DBG("virJSONValueObjectAppend failed for net_json");
+                rc = -1;
+                goto err;
+            }
+        }
+        if (virJSONValueObjectAppend(content, "net_fds", &nets)) {
+            DBG("virJSONValueObjectAppend failed for net_fds");
+            rc = -1;
+            goto err;
+        }
+    }
+    if (!(receiveJson = virJSONValueToString(content, false))) {
+        DBG("virJSONValueToString failed");
+        rc = -1;
+        goto err;
+    }
+
+    DBG("Receive VM from url %s json: %s", rcv_uri, receiveJson);
+
+    if ((mon_sockfd = chMonitorSocketConnect(mon)) < 0) {
+        DBG("socket connect failed");
+        rc = -1;
+        goto err;
+    }
+
+    if (virCHRestoreCreateNetworkDevices(driver, vmdef, &tapfds, &ntapfds, &nicindexes, &nnicindexes) < 0) {
+        DBG("virCHRestoreCreateNetworkDevices failed");
+        rc = -1;
+        goto err_close_fds;
+    }
+
+    /* Bring up netdevs before restoring vm */
+    if (virDomainInterfaceStartDevices(vmdef) < 0) {
+        DBG("virDomainInterfaceStartDevices failed");
+        rc = -1;
+        goto err_close_fds;
+    }
+
+    virBufferAddLit(&http_headers, "PUT /api/v1/vm.receive-migration HTTP/1.1\r\n");
+    virBufferAddLit(&http_headers, "Host: localhost\r\n");
+    virBufferAddLit(&http_headers, "Content-Type: application/json\r\n");
+    virBufferAsprintf(&buf, "%s", virBufferCurrentContent(&http_headers));
+    virBufferAsprintf(&buf, "Content-Length: %zu\r\n\r\n", strlen(receiveJson));
+    virBufferAsprintf(&buf, "%s", receiveJson);
+    payload_len = virBufferUse(&buf);
+    payload = virBufferContentAndReset(&buf);
+
+    // We setup all the network devices and stuff, so let the main thread
+    // continue Main thread will leave the chDomainMigratePrepare3 function so
+    // that the migration protocol can continue.
+    virCondSignal(cond);
+
+    if (virSocketSendMsgWithFDs(mon_sockfd, payload, payload_len, tapfds, ntapfds) < 0) {
+        virReportSystemError(errno, "%s",
+                             _("Failed to send migrate receive request to CH"));
+        rc = -1;
+        goto out_close_fds;
+    }
+
+    // This is a tricky piece of code because a lot can happen behind the curtons.
+    //
+    // We need to close the FDs as soon as virSocketSendMsgWithFDs is done. Otherwise,
+    // the will never be closed if an error happens during live migration on the sender
+    // side which causes this thread to be cancelled during chSocketProcessHttpResponse.
+    //
+    // This cancellation is necessary because otherwise we would block indefinitely in
+    // a recv() system call during chSocketProcessHttpResponse. Closing the FDs here
+    // it totally fine because they have already been transmitted during virSocketSendMsgWithFDs,
+    // but makes the code a little bit ugly.
+    //
+    // See chDomainMigrateFinish3 for more details.
+    if (ntapfds) {
+        chCloseFDs(tapfds, ntapfds);
+        // Don't close the FDs again when we leave this function.
+        ntapfds = 0;
+    }
+
+    if (chSocketProcessHttpResponse(mon_sockfd, false) < 0) {
+        virReportSystemError(errno, "%s",
+                             _("Failed to recv http response from CHV"));
+        rc = -1;
+        goto out;
+    }
+
+out_close_fds:
+    if (ntapfds)
+        chCloseFDs(tapfds, ntapfds);
+
+out:
+    return rc;
+
+err_close_fds:
+    if (ntapfds)
+        chCloseFDs(tapfds, ntapfds);
+err:
+    // We need to signal here to wakeup the receiver thread
+    // so it can fail gracefully.
+    virCondSignal(cond);
+    return rc;
+}
+
 int
 virCHMonitorBuildRestoreJson(virDomainDef *vmdef,
                              const char *from,
@@ -1539,6 +2007,16 @@ virCHMonitorBuildRestoreJson(virDomainDef *vmdef,
         for (i = 0; i < vmdef->nnets; i++) {
             g_autoptr(virJSONValue) net_json = virJSONValueNewObject();
             g_autofree char *id = g_strdup_printf("%s_%zu", CH_NET_ID_PREFIX, i);
+
+            // This is set to 0 in domain_conf.c always. Figure out how to
+            // handle this properly!
+            if (vmdef->nets[i]->driver.virtio.queues == 0) {
+                /* "queues" here refers to queue pairs. When 0, initialize
+                 * queue pairs to 1.
+                 */
+                vmdef->nets[i]->driver.virtio.queues = 1;
+            }
+
             if (virJSONValueObjectAppendString(net_json, "id", id) < 0)
                 return -1;
             if (virJSONValueObjectAppendNumberInt(net_json, "num_fds", vmdef->nets[i]->driver.virtio.queues))

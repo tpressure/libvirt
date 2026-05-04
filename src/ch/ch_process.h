@@ -23,10 +23,16 @@
 #include "ch_conf.h"
 #include "internal.h"
 
+int virCHProcessInit(virCHDriver *driver,
+                     virDomainObj *vm);
+
 int virCHProcessStart(virCHDriver *driver,
                       virDomainObj *vm,
                       virDomainRunningReason reason);
 int virCHProcessStop(virCHDriver *driver,
+                     virDomainObj *vm,
+                     virDomainShutoffReason reason);
+int virCHProcessKill(virCHDriver *driver,
                      virDomainObj *vm,
                      virDomainShutoffReason reason);
 
@@ -47,3 +53,9 @@ chProcessAddNetworkDevice(virCHDriver *driver,
 
 int
 chMonitorSocketConnect(virCHMonitor *mon);
+
+int
+virCHProcessInitCpuAffinity(virDomainObj *vm);
+
+int
+virCHProcessSetup(virDomainObj *vm);
