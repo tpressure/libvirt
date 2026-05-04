@@ -27,26 +27,28 @@
 #include "ch_domain.h"
 #include "ch_driver.h"
 #include "ch_monitor.h"
+#include "ch_pci_addr.h"
 #include "ch_process.h"
 #include "domain_capabilities.h"
 #include "domain_cgroup.h"
+#include "domain_conf.h"
 #include "domain_event.h"
 #include "domain_interface.h"
 #include "domain_validate.h"
 #include "domain_postparse.h"
 #include "datatypes.h"
 #include "driver.h"
+#include "libvirt/libvirt.h"
 #include "viralloc.h"
 #include "viraccessapicheck.h"
 #include "virchrdev.h"
+#include "virconftypes.h"
 #include "virerror.h"
 #include "virjson.h"
 #include "virinhibitor.h"
 #include "virlog.h"
 #include "virobject.h"
 #include "virfile.h"
-#include "virstring.h"
-#include "virtime.h"
 #include "virtypedparam.h"
 #include "virutil.h"
 #include "viruuid.h"
@@ -3529,6 +3531,12 @@ chDomainAttachDeviceLive(virDomainObj *vm,
             break;
         }
 
+        if (chEnsurePciAddress(vm, dev)) {
+            virReportError(VIR_ERR_INTERNAL_ERROR,
+                _("Couldn't allocate PCI device slot for device %s!"), dev->data.disk->info.alias);
+            return -1;
+        }
+
         disks = virJSONValueNewArray();
         if (virCHMonitorBuildDiskJson(disks, dev->data.disk) < 0) {
             DBG("Attach disk failed");
@@ -3545,14 +3553,19 @@ chDomainAttachDeviceLive(virDomainObj *vm,
             break;
         }
 
+        DBG("Disk : dst: %s drivername: %s alias: %s PCI slot: %d", dev->data.disk->dst, dev->data.disk->driverName, dev->data.disk->info.alias, dev->data.disk->info.addr.pci.slot);
         virDomainDiskInsert(vm->def, dev->data.disk);
         dev->data.disk = NULL;
-
         ret = 0;
         break;
     }
     case VIR_DOMAIN_DEVICE_NET:
     {
+        if (chEnsurePciAddress(vm, dev)) {
+            virReportError(VIR_ERR_INTERNAL_ERROR,
+                ("Couldn't allocate PCI device slot for Net device: %s!"), dev->data.net->info.alias);
+            return -1;
+        }
         virDomainNetInsert(vm->def, dev->data.net);
         ret = chProcessAddNetworkDevice(driver, mon, vm->def, dev->data.net);
         dev->data.net = NULL;
@@ -3704,6 +3717,119 @@ chDomainAttachDeviceLiveAndConfigHomogenize(const virDomainDeviceDef *devConf,
 
 }
 
+/* Syncs the addresses of a given disk between two domain definitions.
+ *
+ * Finds the disk in both, `dest` and `source` and copies the address
+ * member of the disk in `source` to `dest`.
+ *
+ * @dest: Domain definition that contains the destination disk
+ * @source: Domain definition that contains the source disk
+ * @disk: Disk definition used to identify the disk in `source` and `destination`
+ * 
+ * 0 indicates success, -1 failure 
+ */
+static int chSyncDiskAddressesBetweenConfigs(virDomainDef *dest, virDomainDef *source, virDomainDiskDef* disk) {
+    virDomainDiskDef* disk_def_live = NULL;
+    virDomainDiskDef* disk_def_pers = NULL;
+    if (!(disk_def_live = virDomainDiskByName(source, disk->dst, true))) {
+        virReportError(VIR_ERR_OPERATION_INVALID,
+                        _("target %1$s does not exists in live configuration"), disk->dst);
+        return -1;
+    }
+    if (!(disk_def_pers = virDomainDiskByName(dest, disk->dst, true))) {
+        virReportError(VIR_ERR_OPERATION_INVALID,
+                        _("target %1$s does not exists in persistent configuration"), disk->dst);
+        return -1;
+    }
+    if (disk_def_live->info.type == VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI) {
+        disk_def_pers->info.type = disk_def_live->info.type;
+        disk_def_pers->info.addr = disk_def_live->info.addr;
+    }
+    return 0;
+}
+
+/* Syncs the addresses of a given network device between two domain definitions.
+ *
+ * Finds the network device in both, `dest` and `source` and copies the address
+ * member of the network definition in `source` to `dest`.
+ *
+ * @dest: Domain definition that contains the destination network device definition
+ * @source: Domain definition that contains the source network device definition
+ * @disk: Network device definition used to identify the disk in `source` and `destination`
+ * 
+ * 0 indicates success, -1 failure 
+ */
+static int chSyncNetAddressesBetweenConfigs(virDomainDef *dest, virDomainDef *source, virDomainNetDef* net) {
+    virDomainNetDef* dev_live = NULL;
+    virDomainNetDef* dev_pers = NULL;
+    if (!(dev_live = virDomainNetFindByName(source, net->ifname))) {
+        virReportError(VIR_ERR_OPERATION_INVALID,
+                        _("target %1$s does not exists in live configuration"), net->ifname);
+        return -1;
+    }
+    if (!(dev_pers = virDomainNetFindByName(dest, net->ifname))) {
+        virReportError(VIR_ERR_OPERATION_INVALID,
+                        _("target %1$s does not exists in persistent configuration"), net->ifname);
+        return -1;
+    }
+    if (dev_live->info.type == VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI) {
+        dev_pers->info.type = dev_live->info.type;
+        dev_pers->info.addr = dev_live->info.addr;
+    }
+    return 0;
+}
+
+/* Syncs the addresses of a given device between two domain definitions.
+ *
+ * Finds the device in both, `dest` and `source` and copies the address
+ * member of the device definition found in `source` to that found in  `dest`.
+ *
+ * @dest: Domain definition that contains the destination device definition
+ * @source: Domain definition that contains the source device definition
+ * @dev: Device definition used to identify the device in `source` and `destination`
+ * 
+ * 0 indicates success, -1 failure 
+ */
+static int chSyncDeviceAddressLiveAndPersistent(virDomainDef *dest, virDomainDef *source, virDomainDeviceDef* dev) {
+    switch (dev->type) {
+    case VIR_DOMAIN_DEVICE_DISK:
+        return chSyncDiskAddressesBetweenConfigs(dest, source, dev->data.disk);
+        break;
+    case VIR_DOMAIN_DEVICE_NET:
+        return chSyncNetAddressesBetweenConfigs(dest, source, dev->data.net);
+        break;
+    case VIR_DOMAIN_DEVICE_SOUND:
+    case VIR_DOMAIN_DEVICE_HOSTDEV:
+    case VIR_DOMAIN_DEVICE_LEASE:
+    case VIR_DOMAIN_DEVICE_CONTROLLER:
+    case VIR_DOMAIN_DEVICE_CHR:
+    case VIR_DOMAIN_DEVICE_FS:
+    case VIR_DOMAIN_DEVICE_RNG:
+    case VIR_DOMAIN_DEVICE_MEMORY:
+    case VIR_DOMAIN_DEVICE_REDIRDEV:
+    case VIR_DOMAIN_DEVICE_SHMEM:
+    case VIR_DOMAIN_DEVICE_WATCHDOG:
+    case VIR_DOMAIN_DEVICE_INPUT:
+    case VIR_DOMAIN_DEVICE_VSOCK:
+    case VIR_DOMAIN_DEVICE_IOMMU:
+    case VIR_DOMAIN_DEVICE_VIDEO:
+    case VIR_DOMAIN_DEVICE_GRAPHICS:
+    case VIR_DOMAIN_DEVICE_HUB:
+    case VIR_DOMAIN_DEVICE_SMARTCARD:
+    case VIR_DOMAIN_DEVICE_MEMBALLOON:
+    case VIR_DOMAIN_DEVICE_NVRAM:
+    case VIR_DOMAIN_DEVICE_NONE:
+    case VIR_DOMAIN_DEVICE_TPM:
+    case VIR_DOMAIN_DEVICE_PANIC:
+    case VIR_DOMAIN_DEVICE_AUDIO:
+    case VIR_DOMAIN_DEVICE_CRYPTO:
+    case VIR_DOMAIN_DEVICE_PSTORE:
+    case VIR_DOMAIN_DEVICE_LAST:
+         DBG("Device does not need to sync addresses");
+    }
+    return 0;
+}
+
 static int
 chDomainAttachDeviceLiveAndConfig(virDomainObj *vm,
                                   virCHDriver *driver,
@@ -3776,8 +3902,16 @@ chDomainAttachDeviceLiveAndConfig(virDomainObj *vm,
                                         true) < 0) {
             return -1;
         }
+        // Store the device definition for later syncing. Below we assign an address to the device, then attach it and
+        // finally clear the pointer. 
+        devConfSave = *devLive;
         if (chDomainAttachDeviceLive(vm, devLive, driver) < 0) {
             return -1;
+        }
+        // If we add the device to both, the runtime and persistent config, we need to ensure that we persist the
+        // device address. Else we might see the device pop up on another address after restarting the domain.
+        if (flags & VIR_DOMAIN_AFFECT_CONFIG) {
+            chSyncDeviceAddressLiveAndPersistent(vmdef, vm->def, &devConfSave);
         }
 
         if (virDomainObjIsActive(vm)) {
@@ -3905,11 +4039,24 @@ chDomainDetachPrepDisk(virDomainObj *vm,
     return 0;
 }
 
+
+/*
+ * Detaches the devices from the running domain and might release the address
+ * occupied by it.
+ *
+ * @vm: Pointer to the VM domain object from which the device is to be removed
+ * @match: Device configuration to search in the VM for removal
+ * @driver: Unused
+ * @async: Unused
+ * @free_addr: Instruction the function to either free the address (if true) 
+ * or keep it allocated (if false).
+ */
 static int
 chDomainDetachDeviceLive(virDomainObj *vm,
                          virDomainDeviceDef *match,
                          virCHDriver */*driver*/,
-                         bool /*async*/)
+                         bool /*async*/,
+                         bool free_addr )
 {
     virDomainDeviceDef detach = { .type = match->type };
     virDomainDeviceInfo *info = NULL;
@@ -3976,6 +4123,14 @@ chDomainDetachDeviceLive(virDomainObj *vm,
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                        _("CH API call for device removal failed."));
         return -1;
+    }
+
+    // Check if we have to release the address used by the device
+    if (free_addr) {
+        // Free PCI device addresses
+        if (info->type == VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI) {
+            chDomainReleaseDeviceAddress(vm, info);
+        } 
     }
 
     if (match->type == VIR_DOMAIN_DEVICE_DISK) {
@@ -4088,6 +4243,48 @@ chDomainDetachDeviceConfig(virDomainDef *vmdef,
     return 0;
 }
 
+static bool chDomainContainsDevice(virDomainDef* dom_def, virDomainDeviceDef* dev_def) {
+    switch (dev_def->type) {
+        case VIR_DOMAIN_DEVICE_DISK:
+            return NULL != virDomainDiskByName(dom_def, dev_def->data.disk->dst, false);
+            break;
+        case VIR_DOMAIN_DEVICE_NET:
+            return NULL != virDomainNetFindByName(dom_def, dev_def->data.net->ifname);
+            break;
+            case VIR_DOMAIN_DEVICE_SOUND:
+        case VIR_DOMAIN_DEVICE_HOSTDEV:
+        case VIR_DOMAIN_DEVICE_LEASE:
+        case VIR_DOMAIN_DEVICE_CONTROLLER:
+        case VIR_DOMAIN_DEVICE_CHR:
+        case VIR_DOMAIN_DEVICE_FS:
+        case VIR_DOMAIN_DEVICE_RNG:
+        case VIR_DOMAIN_DEVICE_MEMORY:
+        case VIR_DOMAIN_DEVICE_REDIRDEV:
+        case VIR_DOMAIN_DEVICE_SHMEM:
+        case VIR_DOMAIN_DEVICE_WATCHDOG:
+        case VIR_DOMAIN_DEVICE_INPUT:
+        case VIR_DOMAIN_DEVICE_VSOCK:
+        case VIR_DOMAIN_DEVICE_IOMMU:
+        case VIR_DOMAIN_DEVICE_VIDEO:
+        case VIR_DOMAIN_DEVICE_GRAPHICS:
+        case VIR_DOMAIN_DEVICE_HUB:
+        case VIR_DOMAIN_DEVICE_SMARTCARD:
+        case VIR_DOMAIN_DEVICE_MEMBALLOON:
+        case VIR_DOMAIN_DEVICE_NVRAM:
+        case VIR_DOMAIN_DEVICE_NONE:
+        case VIR_DOMAIN_DEVICE_TPM:
+        case VIR_DOMAIN_DEVICE_PANIC:
+        case VIR_DOMAIN_DEVICE_AUDIO:
+        case VIR_DOMAIN_DEVICE_CRYPTO:
+        case VIR_DOMAIN_DEVICE_PSTORE:
+        case VIR_DOMAIN_DEVICE_LAST:
+            virReportError(VIR_ERR_OPERATION_UNSUPPORTED,
+                           _("Currently no support for check existence for devices of type `%s`"),
+                           virDomainDeviceTypeToString(dev_def->type));
+    }
+    return false;
+}
+
 static int
 chDomainDetachDeviceLiveAndConfig(virCHDriver *driver,
                                   virDomainObj *vm,
@@ -4112,26 +4309,24 @@ chDomainDetachDeviceLiveAndConfig(virCHDriver *driver,
         !(flags & VIR_DOMAIN_AFFECT_LIVE))
         parse_flags |= VIR_DOMAIN_DEF_PARSE_INACTIVE;
 
-    if (flags & VIR_DOMAIN_AFFECT_CONFIG) {
-        if (!(dev_config = virDomainDeviceDefParse(xml, vm->def, driver->xmlopt,
-                                                   NULL, parse_flags)))
-            return -1;
-    }
-
-    if (flags & VIR_DOMAIN_AFFECT_LIVE) {
-        if (!(dev_live = virDomainDeviceDefParse(xml, vm->def, driver->xmlopt,
-                                                 NULL, parse_flags))) {
-            DBG("chDomainDetachDeviceLiveAndConfig failed");
-            return -1;
-        }
-    }
+    // Get config from both, live and config. We need `dev_config` in any case to 
+    // decide if we should keep the address allocated in the live domain.
+    vmdef = virDomainObjCopyPersistentDef(vm, driver->xmlopt, NULL);
+    /* Make a copy for updated domain. */
+    dev_config = virDomainDeviceDefParse(xml, vmdef, driver->xmlopt, NULL, parse_flags);
+    dev_live = virDomainDeviceDefParse(xml, vm->def, driver->xmlopt,NULL, parse_flags);
 
     if (flags & VIR_DOMAIN_AFFECT_CONFIG) {
-         /* Make a copy for updated domain. */
-         vmdef = virDomainObjCopyPersistentDef(vm, driver->xmlopt, NULL);
          if (!vmdef)
              return -1;
 
+        if (!dev_config) {
+            VIR_ERROR("%s:%d: Tried to detach non-present device from config!", 
+                      __FILE_NAME__,
+                      __LINE__);
+        }
+
+         
          if (chDomainDetachDeviceConfig(vmdef, dev_config, NULL,
                                           parse_flags,
                                           driver->xmlopt) < 0)
@@ -4139,9 +4334,21 @@ chDomainDetachDeviceLiveAndConfig(virCHDriver *driver,
     }
 
     if (flags & VIR_DOMAIN_AFFECT_LIVE) {
+        bool free_addr = false;
         int rc;
 
-        if ((rc = chDomainDetachDeviceLive(vm, dev_live, driver, false)) < 0)
+        // Only release the address, if the device is not present in the persistent config
+        // or if it is removed from both, the live and persistent config.
+        if (!chDomainContainsDevice(vmdef, dev_live) || (flags & VIR_DOMAIN_AFFECT_CONFIG)) 
+            free_addr = true;
+
+        if (!dev_live) {
+            VIR_ERROR("%s:%d: Tried to detach non-present device from live!", 
+                      __FILE_NAME__,
+                      __LINE__);
+        }
+
+        if ((rc = chDomainDetachDeviceLive(vm, dev_live, driver, false, free_addr)) < 0)
             return -1;
 
         if (virDomainObjIsActive(vm)) {

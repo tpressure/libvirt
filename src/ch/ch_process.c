@@ -42,6 +42,7 @@
 #include "virstring.h"
 #include "ch_interface.h"
 #include "ch_hostdev.h"
+#include "ch_pci_addr.h"
 
 #define VIR_FROM_THIS VIR_FROM_CH
 
@@ -1020,6 +1021,13 @@ virCHProcessPrepareDomain(virDomainObj *vm)
 
     g_atomic_int_set(&priv->shutdown_done, 0);
 
+    // Attach all devices from the config to the PCI bus
+    if (chAssignPciAddresses(vm->def, vm)) {
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                    "Failed to assign addresses to PCI devices defined in XML!");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1312,6 +1320,7 @@ virCHProcessStopOrKill(virCHDriver *driver,
     vm->pid = 0;
     vm->def->id = -1;
     g_clear_pointer(&priv->machineName, g_free);
+    g_clear_pointer(&priv->pciAddrSet, virDomainPCIAddressSetFree);
 
     if (priv->pidfile) {
         if (unlink(priv->pidfile) < 0 &&
