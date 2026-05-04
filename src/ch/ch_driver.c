@@ -247,6 +247,8 @@ chDomainCreateXML(virConnectPtr conn,
                                    NULL)))
         goto cleanup;
 
+    DBG("creating domain: name=%s,title=%s", vm->def->name, vm->def->title);
+
     /* cleanup if there's any stale managedsave dir */
     managed_save_path = chDomainManagedSavePath(driver, vm);
     if (virFileDeleteTree(managed_save_path) < 0) {
@@ -279,6 +281,26 @@ chDomainCreateXML(virConnectPtr conn,
     return dom;
 }
 
+/**
+ * Helpful debug info to see which libvirt version is active from the log.
+ */
+static void print_chv_info(void) {
+    unsigned long includeVersion;
+    unsigned int major;
+    unsigned int minor;
+    unsigned int rel;
+
+    includeVersion = LIBVIR_VERSION_NUMBER;
+    major = includeVersion / 1000000;
+    includeVersion %= 1000000;
+    minor = includeVersion / 1000;
+    rel = includeVersion % 1000;
+
+    VIR_WARN("Cloud Hypervisor driver with the patches of Cyberus Technology");
+    VIR_WARN("  libvirt     : %d.%d.%d", major, minor, rel);
+    VIR_WARN("  commit hash : " COMMIT_HASH);
+}
+
 static int
 chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
 {
@@ -289,16 +311,16 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
     int ret = -1;
     g_autoptr(virCHDriverConfig) cfg = NULL;
 
+    print_chv_info();
+
     cfg = virCHDriverGetConfig(driver);
 
     virCheckFlags(0, -1);
 
-#ifdef COMMIT_HASH
-    DBG("Commit hash: %s", COMMIT_HASH);
-#endif
-
     if (!(vm = virCHDomainObjFromDomain(dom)))
         goto cleanup;
+
+    DBG("creating domain: name=%s,title=%s", vm->def->name, vm->def->title);
 
     if (virDomainCreateWithFlagsEnsureACL(dom->conn, vm->def) < 0)
         goto cleanup;
@@ -474,6 +496,8 @@ chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
                                    0, &oldDef)))
         goto cleanup;
 
+    DBG("defining domain: name=%s,title=%s", vm->def->name, vm->def->title);
+
     if (virDomainDefSave(vm->newDef ? vm->newDef : vm->def,
                          driver->xmlopt, cfg->configDir) < 0)
         goto cleanup;
@@ -528,6 +552,8 @@ chDomainUndefineFlags(virDomainPtr dom,
 
     if (!(vm = virCHDomainObjFromDomain(dom)))
         goto cleanup;
+
+    DBG("undefine domain: name=%s,title=%s", vm->def->name, vm->def->title);
 
     if (virDomainUndefineFlagsEnsureACL(dom->conn, vm->def) < 0)
         goto cleanup;
@@ -624,6 +650,8 @@ chDomainShutdownFlags(virDomainPtr dom,
 
     if (!(vm = virCHDomainObjFromDomain(dom)))
         goto cleanup;
+
+    DBG("shutting down domain: name=%s,title=%s", vm->def->name, vm->def->title);
 
     if (virDomainShutdownFlagsEnsureACL(dom->conn, vm->def, flags) < 0)
         goto cleanup;
@@ -839,6 +867,7 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
     if (!(vm = virCHDomainObjFromDomain(dom)))
         goto cleanup;
 
+    DBG("destroying domain: name=%s,title=%s", vm->def->name, vm->def->title);
     if (virDomainDestroyFlagsEnsureACL(dom->conn, vm->def) < 0)
         goto cleanup;
 
@@ -1012,6 +1041,8 @@ chDomainSaveFlags(virDomainPtr dom, const char *to, const char *dxml, unsigned i
     if (!(vm = virCHDomainObjFromDomain(dom)))
         goto cleanup;
 
+    DBG("saving domain: name=%s,title=%s", vm->def->name, vm->def->title);
+
     if (virDomainSaveFlagsEnsureACL(dom->conn, vm->def) < 0)
         goto cleanup;
 
@@ -1169,6 +1200,8 @@ chDomainManagedSave(virDomainPtr dom, unsigned int flags)
     if (!(vm = virCHDomainObjFromDomain(dom)))
         goto cleanup;
 
+    DBG("managedsave domain: name=%s,title=%s", vm->def->name, vm->def->title);
+
     if (virDomainManagedSaveEnsureACL(dom->conn, vm->def) < 0)
         goto cleanup;
 
@@ -1317,6 +1350,8 @@ chDomainRestoreFlags(virConnectPtr conn,
                                    VIR_DOMAIN_OBJ_LIST_ADD_CHECK_LIVE,
                                    NULL)))
         goto cleanup;
+
+    DBG("restoring domain: name=%s,title=%s", vm->def->name, vm->def->title);
 
     if (virDomainObjBeginJob(vm, VIR_JOB_MODIFY) < 0)
         goto cleanup;
@@ -2693,6 +2728,8 @@ chDomainMigrateBegin3(virDomainPtr domain,
     if (!(vm = virCHDomainObjFromDomain(domain)))
         return NULL;
 
+    DBG("begin migrating domain: name=%s,title=%s", vm->def->name, vm->def->title);
+
     if (virDomainMigrateBegin3EnsureACL(domain->conn, vm->def) < 0) {
         virDomainObjEndAPI(&vm);
         return NULL;
@@ -2785,7 +2822,8 @@ chDoMigrateDstReceive(void *opaque)
                                      args->def,
                                      args->driver,
                                      &args->cond,
-                                     args->tcp_serial_url) < 0) {
+                                     args->tcp_serial_url,
+                                     args->use_tls) < 0) {
         DBG("Migration receive failed.");
         args->success = false;
         return;
@@ -2890,15 +2928,20 @@ chDomainMigratePrepare3(virConnectPtr dconn,
     DBG("%p %s %u %p %p %s %p %lu %s %s",
         dconn, cookiein, cookieinlen, cookieout, cookieoutlen, uri_in, uri_out, flags, dname, dom_xml);
 
-    if (virDomainMigratePrepare3EnsureACL(dconn, def) < 0)
-        return -1;
+    if (virDomainMigratePrepare3EnsureACL(dconn, def) < 0) {
+        rc = -1;
+        goto cleanup;
+    }
 
-    if (!(def = chMigrationAnyPrepareDef(driver, dom_xml, dname)))
-        return -1;
+    if (!(def = chMigrationAnyPrepareDef(driver, dom_xml, dname))) {
+        rc = -1;
+        goto cleanup;
+    }
 
     VIR_INFO("Got DomainDef prepared successfully");
 
     if (virPortAllocatorAcquire(driver->migrationPorts, &port) < 0) {
+        rc = -1;
         goto cleanup;
     }
     VIR_DEBUG("Got port %i", port);
@@ -2923,17 +2966,20 @@ chDomainMigratePrepare3(virConnectPtr dconn,
     {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                        _("Could not add Domain Obj to List"));
+        rc = -1;
         goto cleanup;
     }
 
     if (chMigrationJobStart(vm, VIR_ASYNC_JOB_MIGRATION_IN) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                        _("Could not begin async migration job"));
+        rc = -1;
         goto cleanup;
     }
 
     if (virCHProcessInit(driver, vm) < 0) {
         DBG("Could not init process");
+        rc = -1;
         goto cleanup;
     }
 
@@ -2957,6 +3003,7 @@ chDomainMigratePrepare3(virConnectPtr dconn,
     args->driver = driver;
     args->success = false;
     args->tcp_serial_url = NULL;
+    args->use_tls = flags & VIR_MIGRATE_TLS;
 
     if (vm->def->nserials > 0 &&
         vm->def->serials[0]->source->type == VIR_DOMAIN_CHR_TYPE_TCP) {
@@ -2977,6 +3024,7 @@ chDomainMigratePrepare3(virConnectPtr dconn,
                             args) < 0) {
         virReportError(VIR_ERR_OPERATION_FAILED, "%s",
                        _("Failed to create thread for receiving migration data"));
+        rc = -1;
         goto cleanup;
     }
 
@@ -3003,7 +3051,9 @@ chDomainMigratePrepare3(virConnectPtr dconn,
 
 
  cleanup:
-    virDomainObjEndAPI(&vm);
+    if (vm != NULL) {
+        virDomainObjEndAPI(&vm);
+    }
     return rc;
 }
 
@@ -3056,6 +3106,8 @@ chDomainMigrateConfirm3(virDomainPtr domain,
 
     if (!(vm = virCHDomainObjFromDomain(domain)))
         return -1;
+
+    DBG("confirm migration domain: name=%s,title=%s", vm->def->name, vm->def->title);
 
     // priv = vm->privateData;
 
@@ -3120,7 +3172,8 @@ chDomainMigratePerform3Impl(virDomainObj *vm,
                             int *cookieoutlen,
                             unsigned long flags,
                             const char *dname,
-                            unsigned parallel_connections)
+                            unsigned parallel_connections,
+                            bool use_tls)
 {
     virCHDomainObjPrivate *priv = vm->privateData;
     g_autofree char *id = NULL;
@@ -3132,12 +3185,14 @@ chDomainMigratePerform3Impl(virDomainObj *vm,
     int rc = -1;
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
 
-    DBG("chDomainMigratePerform3Impl %s %s %s %lu %s %u",
-        xmlin, dconnuri, uri, flags, dname, parallel_connections);
+    DBG("chDomainMigratePerform3Impl %s %s %s %lu %s %u %s",
+        xmlin, dconnuri, uri, flags, dname, parallel_connections, use_tls ? "true" : "false");
+
+    DBG("migrating domain: name=%s,title=%s", vm->def->name, vm->def->title);
 
     if (!priv->monitor) {
         VIR_ERROR(_("VMs monitor not initialized"));
-        goto cleanup;
+        return -1;
     }
 
     if (chMigrationJobStart(vm, VIR_ASYNC_JOB_MIGRATION_OUT) < 0) {
@@ -3186,7 +3241,7 @@ chDomainMigratePerform3Impl(virDomainObj *vm,
         uri = uri_out;
     }
 
-    if (virCHMonitorMigrationSend(priv->monitor, uri, parallel_connections) < 0) {
+    if (virCHMonitorMigrationSend(priv->monitor, uri, parallel_connections, use_tls, driver->config->migrateTLSx509certdir) < 0) {
         DBG("Migration send failed.");
         ddomain = dconn->driver->domainMigrateFinish3(dconn, vm->def->name, NULL, 0, NULL, NULL, NULL, uri, flags, 1);
         virObjectUnref(ddomain);
@@ -3258,7 +3313,10 @@ chDomainMigratePerform3(virDomainPtr dom,
     if (!(vm = virCHDomainObjFromDomain(dom)))
         return -1;
 
+    DBG("perform migrating domain: name=%s,title=%s", vm->def->name, vm->def->title);
+
     if (virDomainMigratePerform3EnsureACL(dom->conn, vm->def) < 0) {
+        rc = -1;
         goto cleanup;
     }
 
@@ -3273,7 +3331,8 @@ chDomainMigratePerform3(virDomainPtr dom,
                                      cookieoutlen,
                                      flags,
                                      dname,
-                                     1);
+                                     1,
+                                    false);
 
 cleanup:
     virDomainObjEndAPI(&vm);
@@ -3298,20 +3357,34 @@ chDomainMigratePerform3Params(virDomainPtr dom,
     virDomainObj *vm;
     virCHDriver *driver = dom->conn->privateData;
     int rc = -1;
+    bool use_tls = false;
+
+    if (!(vm = virCHDomainObjFromDomain(dom)))
+        return -1;
+
+    if (virDomainMigratePerform3EnsureACL(dom->conn, vm->def) < 0) {
+        rc = -1;
+        goto error;
+    }
 
     if (virTypedParamsGetString(params, nparams,
                                 VIR_MIGRATE_PARAM_URI,
-                                &uri) < 0)
+                                &uri) < 0) {
+        rc = -1;
         goto error;
+    }
 
     if (virTypedParamsGetString(params, nparams,
                                 VIR_MIGRATE_PARAM_DEST_NAME,
-                                &dname) < 0)
+                                &dname) < 0) {
+        rc = -1;
         goto error;
+    }
 
     if (virTypedParamsGetString(params, nparams,
                                 VIR_MIGRATE_PARAM_DEST_XML,
                                 &xmlin) < 0) {
+        rc = -1;
         goto error;
     }
 
@@ -3330,13 +3403,9 @@ chDomainMigratePerform3Params(virDomainPtr dom,
         parallel_connections = 1;
     }
 
+    use_tls = flags & VIR_MIGRATE_TLS;
+
     DBG("chDomainMigratePerform3Params dconnuri: %s dname: %s parallel connection: %d", dconnuri, dname, parallel_connections);
-
-    if (!(vm = virCHDomainObjFromDomain(dom)))
-        return -1;
-
-    if (virDomainMigratePerform3EnsureACL(dom->conn, vm->def) < 0)
-        goto error;
 
     rc = chDomainMigratePerform3Impl(vm,
                                      driver,
@@ -3349,7 +3418,8 @@ chDomainMigratePerform3Params(virDomainPtr dom,
                                      cookieoutlen,
                                      flags,
                                      dname,
-                                     parallel_connections);
+                                     parallel_connections,
+                                     use_tls);
 error:
     virDomainObjEndAPI(&vm);
     return rc;

@@ -59,7 +59,7 @@ virCHEventStopProcess(virDomainObj *vm,
     virCHDriver *driver = CH_DOMAIN_PRIVATE(vm)->driver;
     VIR_LOCK_GUARD lock = virObjectLockGuard(vm);
 
-    if (virDomainObjBeginJob(vm, VIR_JOB_DESTROY))
+    if (virDomainObjBeginJob(vm, VIR_JOB_DESTROY) < 0)
         return -1;
     virCHProcessStop(driver, vm, reason, VIR_CH_PROCESS_STOP_FORCE);
     virDomainObjEndJob(vm);
@@ -165,9 +165,12 @@ virCHProcessEvent(virCHMonitor *mon,
     case VIR_CH_EVENT_VMM_SHUTDOWN:
     case VIR_CH_EVENT_VM_SHUTDOWN:
         if (virCHEventStopProcess(vm, VIR_DOMAIN_SHUTOFF_SHUTDOWN)) {
-            VIR_WARN("Failed to mark the VM(%s) as SHUTDOWN!",
+            VIR_WARN("Failed to mark the %s(%s) as SHUTDOWN!",
+                     ev == VIR_CH_EVENT_VMM_SHUTDOWN ? "VMM" : "VM",
                      vm->def->name);
-            ret = -1;
+            // This is non-fatal because someone else was faster
+            // to shutdown the VMM. This can can happen during
+            // live-migrations.
         }
         break;
     case VIR_CH_EVENT_VM_REBOOTED:

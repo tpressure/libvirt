@@ -60,6 +60,7 @@ struct _chMigrationDstArgs {
     virCond cond;
     volatile bool success;
     char *tcp_serial_url;
+    bool use_tls;
 };
 
 #define CH_DOMAIN_PRIVATE(vm) \
