@@ -21,6 +21,7 @@
 #include "ch_hotplug.h"
 #include "ch_alias.h"
 #include "ch_domain.h"
+#include "ch_pci_addr.h"
 #include "ch_process.h"
 #include "domain_event.h"
 #include "domain_interface.h"
@@ -42,7 +43,11 @@ chDomainAddDisk(virCHMonitor *mon,
         return -1;
     }
 
+    if (chEnsurePciAddress(vm, &disk->info) < 0)
+        return -1;
+
     if (virCHMonitorAddDisk(mon, disk) < 0) {
+        chDomainReleaseDeviceAddress(vm, &disk->info);
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                     _("Adding disk to domain failed"));
         return -1;
@@ -62,7 +67,11 @@ chDomainAddNet(virCHDriver *driver,
 {
     chAssignDeviceNetAlias(vm->def, net);
 
+    if (chEnsurePciAddress(vm, &net->info) < 0)
+        return -1;
+
     if (chProcessAddNetworkDevice(driver, mon, vm->def, net, NULL, NULL) < 0) {
+        chDomainReleaseDeviceAddress(vm, &net->info);
         return -1;
     }
 
@@ -356,6 +365,7 @@ chDomainDetachDeviceLive(virCHDriver *driver,
                          virDomainDeviceDef *match)
 {
     virDomainDeviceDef detach = { .type = match->type };
+    virDomainDeviceInfo addrinfo = { 0 };
     virDomainDeviceInfo *info = NULL;
     virCHDomainObjPrivate *priv = vm->privateData;
     virObjectEvent *event = NULL;
@@ -435,6 +445,7 @@ chDomainDetachDeviceLive(virCHDriver *driver,
      * other tear down is complete.
      */
     alias = g_strdup(info->alias);
+    addrinfo = *info;
 
     if (virCHMonitorRemoveDevice(priv->monitor, info->alias) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR,
@@ -445,6 +456,8 @@ chDomainDetachDeviceLive(virCHDriver *driver,
 
     if (chDomainRemoveDevice(vm, &detach) < 0)
         return -1;
+
+    chDomainReleaseDeviceAddress(vm, &addrinfo);
 
     event = virDomainEventDeviceRemovedNewFromObj(vm, alias);
     virObjectEventStateQueue(driver->domainEventState, event);

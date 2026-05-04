@@ -26,14 +26,15 @@
 #include <unistd.h>
 #include <curl/curl.h>
 
-#include "datatypes.h"
 #include "ch_conf.h"
 #include "ch_domain.h"
 #include "ch_events.h"
 #include "ch_interface.h"
 #include "ch_monitor.h"
+#include "ch_pci_addr.h"
 #include "ch_socket.h"
 #include "domain_interface.h"
+#include "libvirt/libvirt.h"
 #include "viralloc.h"
 #include "vircommand.h"
 #include "virerror.h"
@@ -200,13 +201,19 @@ virCHMonitorBuildConsoleJson(virJSONValue *content,
     g_autoptr(virJSONValue) console = virJSONValueNewObject();
     g_autoptr(virJSONValue) serial = virJSONValueNewObject();
 
-    if (vmdef->nconsoles &&
-        vmdef->consoles[0]->source->type == VIR_DOMAIN_CHR_TYPE_PTY) {
-        if (virJSONValueObjectAppendString(console, "mode", "Pty") < 0)
-            return -1;
-        if (virJSONValueObjectAppend(content, "console", &console) < 0)
+    if (vmdef->nconsoles) {
+        if (vmdef->consoles[0]->source->type == VIR_DOMAIN_CHR_TYPE_PTY) {
+            DBG("Create Serial with type: %d", vmdef->consoles[0]->info.type);
+            if (virJSONValueObjectAppendString(console, "mode", "Pty") < 0)
+                return -1;
+        }
+    } else {
+        DBG("Disable default virtio console device in CHV");
+        if (virJSONValueObjectAppendString(console, "mode", "Off") < 0)
             return -1;
     }
+    if (virJSONValueObjectAppend(content, "console", &console) < 0)
+        return -1;
 
     if (vmdef->nserials) {
         if (vmdef->serials[0]->source->type == VIR_DOMAIN_CHR_TYPE_PTY) {
@@ -467,6 +474,11 @@ virCHMonitorBuildDiskJson(virDomainDiskDef *diskdef)
     if (!diskdef->src)
         return NULL;
 
+    if (!disk) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "Failed to allocate memory for disk JSON!");
+        return -1;
+    }
+
     switch (diskdef->src->type) {
     case VIR_STORAGE_TYPE_FILE:
         if (!diskdef->src->path) {
@@ -501,6 +513,15 @@ virCHMonitorBuildDiskJson(virDomainDiskDef *diskdef)
         }
         if (virJSONValueObjectAppendString(disk, "id", diskdef->info.alias) < 0) {
             return NULL;
+        }
+
+        if (diskdef->info.type == VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI) {
+            if (virJSONValueObjectAppendNumberInt(disk, "bdf_device", diskdef->info.addr.pci.slot) < 0) {
+                virReportError(VIR_ERR_INTERNAL_ERROR,
+                           ("Failed to add slot number to JSON for disk with alias '%s'"),
+                           diskdef->info.alias);
+                return NULL;
+            }
         }
 
         break;
@@ -585,6 +606,16 @@ virCHMonitorBuildRngJson(virJSONValue *content, virDomainDef *vmdef)
         if (virJSONValueObjectAppendString(rng, "src", vmdef->rngs[0]->source.file) < 0)
             return -1;
 
+        // We already know that we have a VIRTIO device from above
+        if (vmdef->rngs[0]->info.type == VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI) {
+            if (virJSONValueObjectAppendNumberInt(rng, "bdf_device", vmdef->rngs[0]->info.addr.pci.slot) < 0) {
+                virReportError(VIR_ERR_INTERNAL_ERROR,
+                            ("Failed to add slot number to JSON for RNG device with alias '%s'"),
+                            vmdef->rngs[0]->info.alias);
+                return -1;
+            }
+        }
+
         if (virJSONValueObjectAppend(content, "rng", &rng) < 0)
             return -1;
 
@@ -627,7 +658,6 @@ virCHMonitorBuildNetJson(virDomainNetDef *net,
         g_autofree char *addr = NULL;
         virSocketAddr netmask;
         g_autofree char *netmaskStr = NULL;
-
         ip = net->guestIP.ips[0];
 
         if (!(addr = virSocketAddrFormat(&ip->address)))
@@ -686,6 +716,11 @@ virCHMonitorBuildNetJson(virDomainNetDef *net,
 
     if (net->mtu) {
         if (virJSONValueObjectAppendNumberInt(net_json, "mtu", net->mtu) < 0)
+            return -1;
+    }
+
+    if (net->info.type == VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI) {
+        if (virJSONValueObjectAppendNumberInt(net_json, "bdf_device", net->info.addr.pci.slot) < 0)
             return -1;
     }
 
@@ -975,6 +1010,13 @@ virCHMonitorReattach(virDomainObj *vm, virCHDriverConfig *cfg, virCHDriver *driv
     }
     mon->eventmonitorfd = event_monitor_fd;
     VIR_DEBUG("%s: Opened the event monitor FIFO(%s)", vm->def->name, mon->eventmonitorpath);
+
+    // Attach all devices from the config to the PCI bus
+    if (chAssignPciAddresses(vm->def, vm)) {
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                    "Failed to assign addresses to PCI devices defined in XML!");
+        return NULL;
+    }
 
     /* now has its own reference */
     mon->vm = virObjectRef(vm);
@@ -1648,7 +1690,7 @@ int virCHMonitorRemoveDevice(virCHMonitor *mon,
     if (virCHMonitorBuildKeyValueStringJson(&payload, "id", device_id) != 0)
         return -1;
 
-    VIR_DEBUG("Remove device id %s json %s", device_id, payload);
+    DBG("Remove device id %s json %s", device_id, payload);
 
     VIR_WITH_OBJECT_LOCK_GUARD(mon) {
         /* reset all options of a libcurl session handle at first */
@@ -1882,15 +1924,7 @@ int virCHMonitorMigrationReceive(virCHMonitor *mon,
             net_json = virJSONValueNewObject();
             // TODO switch to chAssignDeviceNetAlias from ch_alias.c
             id = g_strdup_printf("%s_%zu", CH_NET_ID_PREFIX, i);
-			vmdef->nets[i]->info.alias = g_strdup_printf("%s", id);
-
-			// Populate the <interface type="pci"> XML tag, relevant for OpenStack
-			// Currently not needed to have sane values here.
-			vmdef->nets[i]->info.type = VIR_DOMAIN_DEVICE_ADDRESS_TYPE_PCI;
-			vmdef->nets[i]->info.addr.pci.bus = 0;
-			assert(i <= 7);
-			vmdef->nets[i]->info.addr.pci.slot = i + 1;
-			vmdef->nets[i]->info.addr.pci.function = 0;
+            vmdef->nets[i]->info.alias = g_strdup_printf("%s", id);
 
             if (virJSONValueObjectAppendString(net_json, "id", id) < 0) {
                 DBG("virJSONValueObjectAppendString failed for id");
