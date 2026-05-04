@@ -1,0 +1,19 @@
+[general]
+extra-path=ci/gitlint/rules
+regex-style-search=true
+ignore=body-is-missing,body-max-line-length
+
+[ignore-by-author-name]
+regex=dependabot
+ignore=all
+
+# default 72
+[title-max-length]
+line-length=72
+
+# Empty bodies are fine
+[body-min-length]
+min-length=0
+
+[UC-scope]
+filter-paths=nixos-tests,flake.nix,flake.lock
