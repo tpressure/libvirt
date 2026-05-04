@@ -35,6 +35,7 @@
 #include "viraccessapicheck.h"
 #include "virchrdev.h"
 #include "virerror.h"
+#include "virinhibitor.h"
 #include "virlog.h"
 #include "virobject.h"
 #include "virfile.h"
@@ -210,6 +211,9 @@ chDomainCreateXML(virConnectPtr conn,
     virDomainPtr dom = NULL;
     unsigned int parse_flags = VIR_DOMAIN_DEF_PARSE_INACTIVE;
     g_autofree char *managed_save_path = NULL;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+
+    cfg = virCHDriverGetConfig(driver);
 
     virCheckFlags(VIR_DOMAIN_START_VALIDATE, NULL);
 
@@ -252,6 +256,9 @@ chDomainCreateXML(virConnectPtr conn,
     if (virCHProcessStart(driver, vm, VIR_DOMAIN_RUNNING_BOOTED) < 0)
         goto endjob;
 
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+
     dom = virGetDomain(conn, vm->def->name, vm->def->uuid, vm->def->id);
 
  endjob:
@@ -273,6 +280,9 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
     virCHDomainObjPrivate *priv;
     g_autofree char *managed_save_path = NULL;
     int ret = -1;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+
+    cfg = virCHDriverGetConfig(driver);
 
     virCheckFlags(0, -1);
 
@@ -321,6 +331,11 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
         virObjectEventStateQueue(driver->domainEventState, event);
     }
 
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+
+    vm->newDef = virDomainObjCopyPersistentDef(vm, driver->xmlopt, NULL);
+
  endjob:
     virDomainObjEndJob(vm);
 
@@ -345,6 +360,7 @@ chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
     virDomainPtr dom = NULL;
     virObjectEvent *event = NULL;
     g_autofree char *managed_save_path = NULL;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     unsigned int parse_flags = VIR_DOMAIN_DEF_PARSE_INACTIVE;
 
     virCheckFlags(VIR_DOMAIN_DEFINE_VALIDATE, NULL);
@@ -371,6 +387,10 @@ chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
     if (!(vm = virDomainObjListAdd(driver->domains, &vmdef,
                                    driver->xmlopt,
                                    0, &oldDef)))
+        goto cleanup;
+
+    if (virDomainDefSave(vm->newDef ? vm->newDef : vm->def,
+                         driver->xmlopt, cfg->configDir) < 0)
         goto cleanup;
 
     /* cleanup if there's any stale managedsave dir */
@@ -411,8 +431,12 @@ chDomainUndefineFlags(virDomainPtr dom,
     virDomainObj *vm;
     virObjectEvent *event = NULL;
     int ret = -1;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
 
-    virCheckFlags(0, -1);
+    cfg = virCHDriverGetConfig(driver);
+
+    // causes errors with openstack
+    // virCheckFlags(0, -1);
 
     if (!(vm = virCHDomainObjFromDomain(dom)))
         goto cleanup;
@@ -425,9 +449,15 @@ chDomainUndefineFlags(virDomainPtr dom,
                        "%s", _("Cannot undefine transient domain"));
         goto cleanup;
     }
+
+    if (virDomainDeleteConfig(cfg->configDir, cfg->autostartDir, vm) < 0)
+        goto endjob;
+
     event = virDomainEventLifecycleNewFromObj(vm,
                                               VIR_DOMAIN_EVENT_UNDEFINED,
                                               VIR_DOMAIN_EVENT_UNDEFINED_REMOVED);
+
+    VIR_WARN("Undefining domain '%s'", vm->def->name);
 
     vm->persistent = 0;
     if (!virDomainObjIsActive(vm)) {
@@ -435,6 +465,9 @@ chDomainUndefineFlags(virDomainPtr dom,
     }
 
     ret = 0;
+
+ endjob:
+    virDomainObjEndJob(vm);
 
  cleanup:
     virDomainObjEndAPI(&vm);
@@ -467,6 +500,25 @@ static int chDomainIsActive(virDomainPtr dom)
     return ret;
 }
 
+static int chDomainIsPersistent(virDomainPtr dom)
+{
+    virDomainObj *obj;
+    int ret = -1;
+
+    if (!(obj = virCHDomainObjFromDomain(dom)))
+        goto cleanup;
+
+    if (virDomainIsPersistentEnsureACL(dom->conn, obj->def) < 0)
+        goto cleanup;
+
+    ret = obj->persistent;
+
+ cleanup:
+    virDomainObjEndAPI(&obj);
+    return ret;
+}
+
+
 static int
 chDomainShutdownFlags(virDomainPtr dom,
                       unsigned int flags)
@@ -475,7 +527,12 @@ chDomainShutdownFlags(virDomainPtr dom,
     virDomainObj *vm;
     virDomainState state;
     int ret = -1;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+    virCHDriver *driver = dom->conn->privateData;
 
+    cfg = virCHDriverGetConfig(driver);
+
+    VIR_WARN("chDomainShutdown");
     virCheckFlags(VIR_DOMAIN_SHUTDOWN_ACPI_POWER_BTN, -1);
 
     if (!(vm = virCHDomainObjFromDomain(dom)))
@@ -498,7 +555,11 @@ chDomainShutdownFlags(virDomainPtr dom,
                        _("only can shutdown running/paused domain"));
         goto endjob;
     } else {
-        if (virCHMonitorShutdownVM(priv->monitor) < 0) {
+        /* if (virCHMonitorShutdownVM(priv->monitor) < 0) { */
+        // FIXME: we currently have to shutdown the VMM instead of "only" the VM
+        // here because CHV does not release the network file descriptors
+        // when we send vm.shutdown. We need to fix this in CHV.
+        if (virCHMonitorShutdownVMM(priv->monitor) < 0) {
             virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                         _("failed to shutdown guest VM"));
             goto endjob;
@@ -506,6 +567,14 @@ chDomainShutdownFlags(virDomainPtr dom,
     }
 
     virDomainObjSetState(vm, VIR_DOMAIN_SHUTDOWN, VIR_DOMAIN_SHUTDOWN_USER);
+
+    virDomainObjRemoveTransientDef(vm);
+
+    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
+        goto endjob;
+    }
+
+    VIR_WARN("chDomainShutdown %d", __LINE__);
 
     ret = 0;
 
@@ -565,6 +634,9 @@ chDomainReboot(virDomainPtr dom, unsigned int flags)
         virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_BOOTED);
     else
         virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_UNPAUSED);
+    if (virDomainObjSave(vm, priv->driver->xmlopt, virCHDriverGetConfig(priv->driver)->stateDir) < 0) {
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    }
 
     ret = 0;
 
@@ -610,6 +682,9 @@ chDomainSuspend(virDomainPtr dom)
     }
 
     virDomainObjSetState(vm, VIR_DOMAIN_PAUSED, VIR_DOMAIN_PAUSED_USER);
+    if (virDomainObjSave(vm, priv->driver->xmlopt, virCHDriverGetConfig(priv->driver)->stateDir) < 0) {
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    }
 
     ret = 0;
 
@@ -655,6 +730,9 @@ chDomainResume(virDomainPtr dom)
     }
 
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_UNPAUSED);
+    if (virDomainObjSave(vm, priv->driver->xmlopt, virCHDriverGetConfig(priv->driver)->stateDir) < 0) {
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    }
 
     ret = 0;
 
@@ -682,6 +760,7 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
     virDomainObj *vm;
     virObjectEvent *event = NULL;
     unsigned int stopFlags = 0;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret = -1;
 
     virCheckFlags(VIR_DOMAIN_DESTROY_GRACEFUL, -1);
@@ -703,6 +782,12 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
 
     if (virCHProcessStop(driver, vm,
                          VIR_DOMAIN_SHUTOFF_DESTROYED, stopFlags) < 0) {
+        goto endjob;
+    }
+
+    virDomainObjRemoveTransientDef(vm);
+
+    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
         goto endjob;
     }
 
@@ -1145,6 +1230,9 @@ chDomainRestoreFlags(virConnectPtr conn,
     virCHDomainObjPrivate *priv;
     g_autoptr(virDomainDef) def = NULL;
     int ret = -1;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+
+    cfg = virCHDriverGetConfig(driver);
 
     virCheckFlags(0, -1);
 
@@ -1182,6 +1270,10 @@ chDomainRestoreFlags(virConnectPtr conn,
         goto endjob;
     }
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_RESTORED);
+
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+
     ret = 0;
 
  endjob:
@@ -1443,8 +1535,24 @@ static int chStateCleanup(void)
     virObjectUnref(ch_driver->domains);
     virObjectUnref(ch_driver->hostdevMgr);
     virObjectUnref(ch_driver->domainEventState);
+    virObjectUnref(ch_driver->migrationPorts);
+    virObjectUnref(ch_driver->inhibitor);
     virMutexDestroy(&ch_driver->lock);
     g_clear_pointer(&ch_driver, g_free);
+
+    return 0;
+}
+
+static int
+chDomainReattach(virDomainObj *vm, void *data)
+{
+    virCHDriver *driver = data;
+    virCHDomainObjPrivate *priv = vm->privateData;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
+    virDomainState state = virDomainObjGetState(vm, NULL);
+
+    if (state == VIR_DOMAIN_RUNNING || state == VIR_DOMAIN_PAUSED)
+        priv->monitor = virCHMonitorReattach(vm, cfg);
 
     return 0;
 }
@@ -1458,6 +1566,7 @@ chStateInitialize(bool privileged,
 {
     g_autofree char *driverConf = NULL;
     int ret = VIR_DRV_STATE_INIT_ERROR;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
     int rv;
 
     if (root != NULL) {
@@ -1493,7 +1602,7 @@ chStateInitialize(bool privileged,
     if (!(ch_driver->config = virCHDriverConfigNew(privileged)))
         goto cleanup;
 
-    driverConf = g_strdup_printf("%s/ch.conf", ch_driver->config->configDir);
+    driverConf = g_strdup_printf("%s/ch.conf", ch_driver->config->configFileDir);
 
     if (virCHDriverConfigLoadFile(ch_driver->config, driverConf) < 0)
         goto cleanup;
@@ -1504,6 +1613,20 @@ chStateInitialize(bool privileged,
     if (!(ch_driver->domainEventState = virObjectEventStateNew()))
         goto cleanup;
 
+    ch_driver->inhibitor = virInhibitorNew(
+        VIR_INHIBITOR_WHAT_SHUTDOWN,
+        _("Libvirt CHV"),
+        _("CHV virtual machines are running"),
+        VIR_INHIBITOR_MODE_DELAY,
+        callback,
+        opaque);
+
+        /* Allocate bitmap for migration port reservation */
+    if (!(ch_driver->migrationPorts =
+          virPortAllocatorRangeNew(_("migration"),
+                                   49152,
+                                   49216)))
+        goto cleanup;
     if ((rv = chExtractVersion(ch_driver)) < 0) {
         if (rv == -2)
             ret = VIR_DRV_STATE_INIT_SKIPPED;
@@ -1512,7 +1635,30 @@ chStateInitialize(bool privileged,
 
     ch_driver->chCaps = virCHCapsInitCHVersionCaps(ch_driver->version);
 
+    /* Get all the running persistent or transient configs first */
+    cfg = virCHDriverGetConfig(ch_driver);
+    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                       cfg->stateDir,
+                                       NULL, true,
+                                       ch_driver->xmlopt,
+                                       NULL, NULL) < 0)
+        goto cleanup;
+
+    /* Then inactive persistent configs */
+    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                       cfg->configDir,
+                                       cfg->autostartDir, false,
+                                       ch_driver->xmlopt,
+                                       NULL, NULL) < 0)
+        goto cleanup;
+
     ch_driver->privileged = privileged;
+
+    virDomainObjListForEach(ch_driver->domains,
+                            true,
+                            chDomainReattach,
+                            ch_driver);
+
     ret = VIR_DRV_STATE_INIT_COMPLETE;
 
  cleanup:
@@ -1857,6 +2003,7 @@ chDomainPinVcpuFlags(virDomainPtr dom,
     if (persistentDef) {
         virBitmapFree(vcpuinfo->cpumask);
         vcpuinfo->cpumask = g_steal_pointer(&pcpumap);
+        ret = virDomainDefSave(persistentDef, driver->xmlopt, cfg->configDir);
         goto endjob;
     }
 
@@ -2020,7 +2167,8 @@ chDomainPinEmulator(virDomainPtr dom,
         virBitmapFree(persistentDef->cputune.emulatorpin);
         persistentDef->cputune.emulatorpin = virBitmapNewCopy(pcpumap);
 
-        /* Inactive XMLs are not saved, yet. */
+        ret = virDomainDefSave(persistentDef, driver->xmlopt, cfg->configDir);
+        goto endjob;
     }
 
     ret = 0;
@@ -2281,7 +2429,8 @@ chDomainSetNumaParameters(virDomainPtr dom,
                                  -1, mode, nodeset) < 0)
             goto endjob;
 
-        /* Inactive XMLs are not saved, yet. */
+        if (virDomainDefSave(persistentDef, driver->xmlopt, cfg->configDir) < 0)
+            goto endjob;
     }
 
     ret = 0;
@@ -2424,7 +2573,6 @@ chDomainAttachDeviceFlags(virDomainPtr dom,
     return ret;
 }
 
-static int
 chDomainAttachDevice(virDomainPtr dom,
                      const char *xml)
 {
@@ -2471,7 +2619,6 @@ static int chDomainDetachDevice(virDomainPtr dom, const char *xml)
                                      VIR_DOMAIN_AFFECT_LIVE);
 }
 
-
 static int
 chConnectDomainEventRegister(virConnectPtr conn,
                              virConnectDomainEventCallback callback,
@@ -2491,7 +2638,6 @@ chConnectDomainEventRegister(virConnectPtr conn,
     return 0;
 }
 
-
 static int
 chConnectDomainEventDeregister(virConnectPtr conn,
                                virConnectDomainEventCallback callback)
@@ -2509,6 +2655,29 @@ chConnectDomainEventDeregister(virConnectPtr conn,
     return 0;
 }
 
+static int
+chStateShutdownPrepare(void)
+{
+    return 0;
+}
+
+static int
+chStateShutdownWait(void)
+{
+    return 0;
+}
+
+static int
+chStateReload(void)
+{
+    return 0;
+}
+
+static int
+chStateStop(void)
+{
+    return 0;
+}
 
 /* Function Tables */
 static virHypervisorDriver chHypervisorDriver = {
@@ -2545,6 +2714,7 @@ static virHypervisorDriver chHypervisorDriver = {
     .domainGetXMLDesc = chDomainGetXMLDesc,                 /* 7.5.0 */
     .domainGetInfo = chDomainGetInfo,                       /* 7.5.0 */
     .domainIsActive = chDomainIsActive,                     /* 7.5.0 */
+    .domainIsPersistent = chDomainIsPersistent,             /* 7.5.0 */
     .domainOpenConsole = chDomainOpenConsole,               /* 7.8.0 */
     .nodeGetInfo = chNodeGetInfo,                           /* 7.5.0 */
     .domainGetVcpus = chDomainGetVcpus,                     /* 8.0.0 */
@@ -2589,6 +2759,10 @@ static virStateDriver chStateDriver = {
     .name = "cloud-hypervisor",
     .stateInitialize = chStateInitialize,
     .stateCleanup = chStateCleanup,
+    .stateReload = chStateReload,
+    .stateStop = chStateStop,
+    .stateShutdownPrepare = chStateShutdownPrepare,
+    .stateShutdownWait = chStateShutdownWait,
 };
 
 int chRegister(void)
