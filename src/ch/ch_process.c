@@ -24,6 +24,8 @@
 #include <fcntl.h>
 #include <poll.h>
 
+#include "ch_alias.h"
+#include "ch_socket.h"
 #include "ch_domain.h"
 #include "ch_monitor.h"
 #include "ch_process.h"
@@ -887,6 +889,9 @@ static int
 virCHProcessPrepareDomain(virDomainObj *vm)
 {
     if (virCHProcessPrepareDomainHostdevs(vm) < 0)
+        return -1;
+
+    if (chAssignDeviceAliases(vm->def) < 0)
         return -1;
 
     return 0;

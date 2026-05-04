@@ -21,6 +21,7 @@
 #include <config.h>
 #include <fcntl.h>
 
+#include "ch_alias.h"
 #include "ch_capabilities.h"
 #include "ch_conf.h"
 #include "ch_domain.h"
@@ -29,19 +30,28 @@
 #include "ch_process.h"
 #include "domain_cgroup.h"
 #include "domain_event.h"
+#include "domain_interface.h"
+#include "domain_validate.h"
+#include "domain_postparse.h"
 #include "datatypes.h"
 #include "driver.h"
+#include "viralloc.h"
 #include "viraccessapicheck.h"
 #include "virchrdev.h"
 #include "virerror.h"
+#include "virjson.h"
 #include "virlog.h"
 #include "virobject.h"
 #include "virfile.h"
+#include "virstring.h"
+#include "virtime.h"
 #include "virtypedparam.h"
 #include "virutil.h"
 #include "viruuid.h"
 #include "virnuma.h"
 #include "virhostmem.h"
+
+#include "util/virportallocator.h"
 
 #define VIR_FROM_THIS VIR_FROM_CH
 
@@ -2376,6 +2386,576 @@ chDomainInterfaceAddresses(virDomain *dom,
 }
 
 
+static int
+chDomainAttachDeviceLive(virDomainObj *vm,
+                         virDomainDeviceDef *dev,
+                         virCHDriver */*driver*/)
+{
+    int ret = -1;
+    virCHDomainObjPrivate *priv = vm->privateData;
+    virJSONValue *response = NULL;
+
+    switch (dev->type) {
+    case VIR_DOMAIN_DEVICE_DISK: {
+        g_autoptr(virJSONValue) disks = NULL;
+        g_autofree char *payload = NULL;
+        g_autofree char *idTmp = NULL;
+
+        if (chAssignDeviceDiskAlias(vm->def, dev->data.disk) < 0) {
+            VIR_WARN("assigning disk alias failed");
+            break;
+        }
+
+        disks = virJSONValueNewArray();
+        if (virCHMonitorBuildDiskJson(disks, dev->data.disk) < 0) {
+            VIR_WARN("Attach disk failed");
+            break;
+        }
+        payload = virJSONValueToString(virJSONValueArrayGet(disks, 0), false);
+
+        VIR_DEBUG("Attach disk %s", payload);
+
+        response = virCHMonitorPut(priv->monitor, URL_VM_ADD_DISK, payload, NULL);
+
+        if (!response) {
+            VIR_WARN("Attach disk failed. Invalid CH response.");
+            break;
+        }
+
+        VIR_WARN("Disk : dst: %s drivername: %s alias: %s", dev->data.disk->dst, dev->data.disk->driverName, dev->data.disk->info.alias);
+
+        virDomainDiskInsert(vm->def, dev->data.disk);
+        dev->data.disk = NULL;
+
+        ret = 0;
+        break;
+    }
+    case VIR_DOMAIN_DEVICE_LEASE:
+    case VIR_DOMAIN_DEVICE_FS:
+    case VIR_DOMAIN_DEVICE_NET:
+    case VIR_DOMAIN_DEVICE_INPUT:
+    case VIR_DOMAIN_DEVICE_HOSTDEV:
+    case VIR_DOMAIN_DEVICE_WATCHDOG:
+    case VIR_DOMAIN_DEVICE_CONTROLLER:
+    case VIR_DOMAIN_DEVICE_REDIRDEV:
+    case VIR_DOMAIN_DEVICE_CHR:
+    case VIR_DOMAIN_DEVICE_RNG:
+    case VIR_DOMAIN_DEVICE_SHMEM:
+    case VIR_DOMAIN_DEVICE_MEMORY:
+    case VIR_DOMAIN_DEVICE_VSOCK:
+    case VIR_DOMAIN_DEVICE_NONE:
+    case VIR_DOMAIN_DEVICE_SOUND:
+    case VIR_DOMAIN_DEVICE_VIDEO:
+    case VIR_DOMAIN_DEVICE_GRAPHICS:
+    case VIR_DOMAIN_DEVICE_HUB:
+    case VIR_DOMAIN_DEVICE_SMARTCARD:
+    case VIR_DOMAIN_DEVICE_MEMBALLOON:
+    case VIR_DOMAIN_DEVICE_NVRAM:
+    case VIR_DOMAIN_DEVICE_TPM:
+    case VIR_DOMAIN_DEVICE_PANIC:
+    case VIR_DOMAIN_DEVICE_IOMMU:
+    case VIR_DOMAIN_DEVICE_AUDIO:
+    case VIR_DOMAIN_DEVICE_CRYPTO:
+    case VIR_DOMAIN_DEVICE_PSTORE:
+    case VIR_DOMAIN_DEVICE_LAST:
+    default:
+        virReportError(VIR_ERR_OPERATION_UNSUPPORTED,
+                       _("live attach of device '%1$s' is not supported"),
+                       virDomainDeviceTypeToString(dev->type));
+        break;
+    }
+
+    virJSONValueFree(response);
+    return ret;
+}
+
+static int
+chDomainAttachDeviceConfig(virDomainDef *vmdef,
+                           virDomainDeviceDef *dev,
+                           unsigned int parse_flags,
+                           virDomainXMLOption *xmlopt)
+{
+    virDomainDiskDef *disk;
+    // virDomainSoundDef *sound;
+    // virDomainHostdevDef *hostdev;
+    // virDomainLeaseDef *lease;
+    // virDomainControllerDef *controller;
+    // virDomainFSDef *fs;
+    // virDomainRedirdevDef *redirdev;
+    // virDomainShmemDef *shmem;
+
+    switch (dev->type) {
+    case VIR_DOMAIN_DEVICE_DISK:
+        disk = dev->data.disk;
+        if (virDomainDiskIndexByName(vmdef, disk->dst, true) >= 0) {
+            virReportError(VIR_ERR_OPERATION_INVALID,
+                           _("target %1$s already exists"), disk->dst);
+            return -1;
+        }
+        if (virDomainDiskTranslateSourcePool(disk) < 0) {
+            VIR_WARN("virDomainDiskTranslateSourcePool failed");
+            return -1;
+        }
+        // if (qemuCheckDiskConfigAgainstDomain(vmdef, disk) < 0)
+        //     return -1;
+        VIR_WARN("virDomainDiskInsert");
+        virDomainDiskInsert(vmdef, disk);
+        /* vmdef has the pointer. Generic codes for vmdef will do all jobs */
+        dev->data.disk = NULL;
+        break;
+    case VIR_DOMAIN_DEVICE_NET:
+    case VIR_DOMAIN_DEVICE_SOUND:
+    case VIR_DOMAIN_DEVICE_HOSTDEV:
+    case VIR_DOMAIN_DEVICE_LEASE:
+    case VIR_DOMAIN_DEVICE_CONTROLLER:
+    case VIR_DOMAIN_DEVICE_CHR:
+    case VIR_DOMAIN_DEVICE_FS:
+    case VIR_DOMAIN_DEVICE_RNG:
+    case VIR_DOMAIN_DEVICE_MEMORY:
+    case VIR_DOMAIN_DEVICE_REDIRDEV:
+    case VIR_DOMAIN_DEVICE_SHMEM:
+    case VIR_DOMAIN_DEVICE_WATCHDOG:
+    case VIR_DOMAIN_DEVICE_INPUT:
+    case VIR_DOMAIN_DEVICE_VSOCK:
+    case VIR_DOMAIN_DEVICE_IOMMU:
+    case VIR_DOMAIN_DEVICE_VIDEO:
+    case VIR_DOMAIN_DEVICE_GRAPHICS:
+    case VIR_DOMAIN_DEVICE_HUB:
+    case VIR_DOMAIN_DEVICE_SMARTCARD:
+    case VIR_DOMAIN_DEVICE_MEMBALLOON:
+    case VIR_DOMAIN_DEVICE_NVRAM:
+    case VIR_DOMAIN_DEVICE_NONE:
+    case VIR_DOMAIN_DEVICE_TPM:
+    case VIR_DOMAIN_DEVICE_PANIC:
+    case VIR_DOMAIN_DEVICE_AUDIO:
+    case VIR_DOMAIN_DEVICE_CRYPTO:
+    case VIR_DOMAIN_DEVICE_PSTORE:
+    case VIR_DOMAIN_DEVICE_LAST:
+         virReportError(VIR_ERR_OPERATION_UNSUPPORTED,
+                        _("persistent attach of device '%1$s' is not supported"),
+                        virDomainDeviceTypeToString(dev->type));
+         return -1;
+    }
+    if (virDomainDefPostParse(vmdef, parse_flags, xmlopt, NULL) < 0) {
+        VIR_WARN("virDomainDefPostParse failed");
+        return -1;
+    }
+
+    if (virDomainDefValidate(vmdef, parse_flags, xmlopt, NULL) < 0) {
+        VIR_WARN("virDomainDefValidate failed");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int
+chDomainAttachDeviceLiveAndConfig(virDomainObj *vm,
+                                  virCHDriver *driver,
+                                  const char *xml,
+                                  unsigned int flags)
+{
+    // virCHDomainObjPrivate *priv = vm->privateData;
+    unsigned int parse_flags = VIR_DOMAIN_DEF_PARSE_INACTIVE |
+                               VIR_DOMAIN_DEF_PARSE_ABI_UPDATE;
+    virObjectEvent *event = NULL;
+    g_autoptr(virDomainDeviceDef) devLive = NULL;
+    g_autoptr(virDomainDef) vmdef = NULL;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+    g_autoptr(virDomainDeviceDef) devConf = NULL;
+    // virDomainDeviceDef devConfSave = { 0 };
+
+    virCheckFlags(VIR_DOMAIN_AFFECT_LIVE |
+                  VIR_DOMAIN_AFFECT_CONFIG, -1);
+
+    VIR_WARN("Flags: %u", flags);
+    cfg = virCHDriverGetConfig(driver);
+
+    if (flags & VIR_DOMAIN_AFFECT_CONFIG) {
+        vmdef = virDomainObjCopyPersistentDef(vm, driver->xmlopt,
+                                              NULL/*priv->qemuCaps*/);
+        if (!vmdef)
+            return -1;
+
+        if (!(devConf = virDomainDeviceDefParse(xml, vmdef,
+                                                driver->xmlopt, NULL /*priv->qemuCaps*/,
+                                                parse_flags)))
+            return -1;
+        /*
+         * devConf will be NULLed out by
+         * qemuDomainAttachDeviceConfig(), so save it for later use by
+         * qemuDomainAttachDeviceLiveAndConfigHomogenize()
+         */
+        // devConfSave = *devConf;
+
+        if (virDomainDeviceValidateAliasForHotplug(vm, devConf,
+                                                   VIR_DOMAIN_AFFECT_CONFIG) < 0)
+            return -1;
+
+        if (virDomainDefCompatibleDevice(vmdef, devConf, NULL,
+                                         VIR_DOMAIN_DEVICE_ACTION_ATTACH,
+                                         false) < 0)
+            return -1;
+
+        if (chDomainAttachDeviceConfig(vmdef, devConf,
+                                         parse_flags,
+                                         driver->xmlopt) < 0)
+            return -1;
+    }
+
+    if (flags & VIR_DOMAIN_AFFECT_LIVE) {
+        if (!(devLive = virDomainDeviceDefParse(xml, vm->def,
+                                                driver->xmlopt, NULL/*priv->qemuCaps*/,
+                                                parse_flags))) {
+            return -1;
+        }
+
+        VIR_WARN("chDomainAttachDeviceFlags xml: %s", xml);
+        if (virDomainDeviceValidateAliasForHotplug(vm, devLive,
+                                                VIR_DOMAIN_AFFECT_LIVE) < 0)
+            return -1;
+
+        if (virDomainDefCompatibleDevice(vm->def, devLive, NULL,
+                                        VIR_DOMAIN_DEVICE_ACTION_ATTACH,
+                                        true) < 0) {
+            return -1;
+        }
+        if (chDomainAttachDeviceLive(vm, devLive, driver) < 0)
+            return -1;
+
+        // qemuDomainSaveStatus(vm);
+        if (virDomainObjIsActive(vm)) {
+            if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+                VIR_WARN("Failed to save status on vm %s", vm->def->name);
+        }
+    }
+
+    if (flags & VIR_DOMAIN_AFFECT_CONFIG) {
+        if (virDomainDefSave(vmdef, driver->xmlopt, cfg->stateDir) < 0) {
+            VIR_WARN("virDomainDefSave failed");
+            return -1;
+        }
+        virDomainObjAssignDef(vm, &vmdef, false, NULL);
+        /* Event sending if persistent config has changed */
+        event = virDomainEventLifecycleNewFromObj(vm,
+                                                  VIR_DOMAIN_EVENT_DEFINED,
+                                                  VIR_DOMAIN_EVENT_DEFINED_UPDATED);
+        virObjectEventStateQueue(driver->domainEventState, event);
+    }
+
+    return 0;
+}
+
+static int
+chDomainAttachDeviceFlags(virDomainPtr dom,
+                          const char *xml,
+                          unsigned int flags)
+{
+    virCHDriver *driver = dom->conn->privateData;
+    virDomainObj *vm = NULL;
+    int ret = -1;
+
+    VIR_WARN("chDomainAttachDeviceFlags");
+
+    if (!(vm = virCHDomainObjFromDomain(dom)))
+        goto cleanup;
+
+    if (virDomainAttachDeviceFlagsEnsureACL(dom->conn, vm->def, flags) < 0)
+        goto cleanup;
+
+    if (virDomainObjBeginJob(vm, VIR_JOB_MODIFY) < 0)
+        goto cleanup;
+
+    if (virDomainObjUpdateModificationImpact(vm, &flags) < 0)
+        goto endjob;
+
+    if (chDomainAttachDeviceLiveAndConfig(vm, driver, xml, flags) < 0)
+        goto endjob;
+
+    ret = 0;
+
+ endjob:
+    virDomainObjEndJob(vm);
+
+ cleanup:
+    virDomainObjEndAPI(&vm);
+    return ret;
+}
+
+static int
+chFindNet(virDomainDef *def, const char *dst)
+{
+    size_t i;
+
+    for (i = 0; i < def->nnets; i++) {
+        if (STREQ(def->nets[i]->ifname, dst))
+            return i;
+    }
+
+    return -1;
+}
+
+static int
+chDomainDetachPrepNet(virDomainObj *vm,
+                      virDomainNetDef *match,
+                      virDomainNetDef **detach)
+{
+    int idx;
+
+    if (!match->ifname) {
+        virReportError(VIR_ERR_DEVICE_MISSING,
+                       _("no interface name specified"));
+        return -1;
+    }
+    if ((idx = chFindNet(vm->def, match->ifname)) < 0) {
+        virReportError(VIR_ERR_DEVICE_MISSING,
+                       _("net %1$s not found"), match->ifname);
+        return -1;
+    }
+    *detach = vm->def->nets[idx];
+
+    return 0;
+}
+
+static int
+chFindDisk(virDomainDef *def, const char *dst)
+{
+    size_t i;
+
+    for (i = 0; i < def->ndisks; i++) {
+        if (STREQ(def->disks[i]->dst, dst))
+            return i;
+    }
+
+    return -1;
+}
+
+static int
+chDomainDetachPrepDisk(virDomainObj *vm,
+                       virDomainDiskDef *match,
+                       virDomainDiskDef **detach)
+{
+    virDomainDiskDef *disk;
+    int idx;
+
+    if ((idx = chFindDisk(vm->def, match->dst)) < 0) {
+        virReportError(VIR_ERR_DEVICE_MISSING,
+                       _("disk %1$s not found"), match->dst);
+        return -1;
+    }
+    *detach = disk = vm->def->disks[idx];
+
+    return 0;
+}
+
+static int
+chDomainDetachDeviceLive(virDomainObj *vm,
+                         virDomainDeviceDef *match,
+                         virCHDriver */*driver*/,
+                         bool /*async*/)
+{
+    virDomainDeviceDef detach = { .type = match->type };
+    virDomainDeviceInfo *info = NULL;
+    virCHDomainObjPrivate *priv = vm->privateData;
+    int idx = 0;
+    // int ret = -1;
+    // int rc;
+
+    if (match->type != VIR_DOMAIN_DEVICE_DISK) {
+        virReportError(VIR_ERR_OPERATION_UNSUPPORTED,
+                       _("live detach of device '%1$s' is not supported"),
+                       virDomainDeviceTypeToString(match->type));
+        return -1;
+    }
+
+    if (chDomainDetachPrepDisk(vm, match->data.disk,
+                               &detach.data.disk) < 0) {
+        VIR_WARN("chDomainDetachPrepDisk failed");
+        return -1;
+    }
+
+
+    /* "detach" now points to the actual device we want to detach */
+
+    if (!(info = virDomainDeviceGetInfo(&detach))) {
+        /*
+         * This should never happen, since all of the device types in
+         * the switch cases that end with a "break" instead of a
+         * return have a virDeviceInfo in them.
+         */
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       _("device of type '%1$s' has no device info"),
+                       virDomainDeviceTypeToString(detach.type));
+        return -1;
+    }
+
+
+    /* Make generic validation checks common to all device types */
+
+    if (!info->alias) {
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       _("Cannot detach %1$s device with no alias"),
+                       virDomainDeviceTypeToString(detach.type));
+        return -1;
+    }
+
+    /**
+     * TODO:
+     * There can be multiple disks attached to a virtio slot e.g. vda or vdb
+     * All of those disks should be removed in the XML and in CHV when detach is called.
+     */
+
+    // rc = qemuDomainDeleteDevice(vm, info->alias);
+    VIR_WARN("Try to remove device with id %s", info->alias);
+    if (virCHMonitorRemoveDevice(priv->monitor, info->alias) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("CH API call for device removal failed."));
+        return -1;
+    }
+
+    idx = chFindDisk(vm->def, match->data.disk->dst);
+    if (idx >= 0) {
+        VIR_WARN("Remove device from libvirt xml state %d", idx);
+        virDomainDiskRemove(vm->def, idx);
+    }
+
+//  cleanup:
+
+    return 0;
+}
+
+static int
+chDomainDetachDeviceLiveAndConfig(virCHDriver *driver,
+                                  virDomainObj *vm,
+                                  const char *xml,
+                                  unsigned int flags)
+{
+    // qemuDomainObjPrivate *priv = vm->privateData;
+    virObjectEvent *event = NULL;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+    g_autoptr(virDomainDeviceDef) dev_config = NULL;
+    g_autoptr(virDomainDeviceDef) dev_live = NULL;
+    unsigned int parse_flags = VIR_DOMAIN_DEF_PARSE_SKIP_VALIDATE;
+    g_autoptr(virDomainDef) vmdef = NULL;
+
+    virCheckFlags(VIR_DOMAIN_AFFECT_LIVE |
+                  VIR_DOMAIN_AFFECT_CONFIG, -1);
+
+    VIR_WARN("chDomainDetachDeviceLiveAndConfig xml: %s", xml);
+
+    cfg = virCHDriverGetConfig(driver);
+
+    if ((flags & VIR_DOMAIN_AFFECT_CONFIG) &&
+        !(flags & VIR_DOMAIN_AFFECT_LIVE))
+        parse_flags |= VIR_DOMAIN_DEF_PARSE_INACTIVE;
+
+    if (flags & VIR_DOMAIN_AFFECT_CONFIG) {
+        if (!(dev_config = virDomainDeviceDefParse(xml, vm->def, driver->xmlopt,
+                                                   NULL, parse_flags)))
+            return -1;
+    }
+
+    if (flags & VIR_DOMAIN_AFFECT_LIVE) {
+        if (!(dev_live = virDomainDeviceDefParse(xml, vm->def, driver->xmlopt,
+                                                 NULL, parse_flags))) {
+            VIR_WARN("chDomainDetachDeviceLiveAndConfig failed");
+            return -1;
+        }
+    }
+
+    // if (flags & VIR_DOMAIN_AFFECT_CONFIG) {
+    //     /* Make a copy for updated domain. */
+    //     vmdef = virDomainObjCopyPersistentDef(vm, driver->xmlopt, NULL);
+    //     if (!vmdef)
+    //         return -1;
+
+    //     if (qemuDomainDetachDeviceConfig(vmdef, dev_config, NULL,
+    //                                      parse_flags,
+    //                                      driver->xmlopt) < 0)
+    //         return -1;
+    // }
+
+    if (flags & VIR_DOMAIN_AFFECT_LIVE) {
+        int rc;
+
+        if ((rc = chDomainDetachDeviceLive(vm, dev_live, driver, false)) < 0)
+            return -1;
+
+        // if (rc == 0 && qemuDomainUpdateDeviceList(vm, VIR_ASYNC_JOB_NONE) < 0)
+        //     return -1;
+
+        // qemuDomainSaveStatus(vm);
+        if (virDomainObjIsActive(vm)) {
+            if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+                VIR_WARN("Failed to save status on vm %s", vm->def->name);
+        }
+    }
+
+    /* Finally, if no error until here, we can save config. */
+    if (flags & VIR_DOMAIN_AFFECT_CONFIG) {
+        if (virDomainDefSave(vmdef, driver->xmlopt, cfg->configDir) < 0)
+            return -1;
+
+        virDomainObjAssignDef(vm, &vmdef, false, NULL);
+
+        /* Event sending if persistent config has changed */
+        event = virDomainEventLifecycleNewFromObj(vm,
+                                                  VIR_DOMAIN_EVENT_DEFINED,
+                                                  VIR_DOMAIN_EVENT_DEFINED_UPDATED);
+        virObjectEventStateQueue(driver->domainEventState, event);
+#endif
+    }
+
+    return 0;
+}
+
+static int
+chDomainAttachDevice(virDomainPtr dom,
+                     const char *xml)
+{
+    return chDomainAttachDeviceFlags(dom, xml, VIR_DOMAIN_AFFECT_LIVE);
+}
+
+static int
+chDomainDetachDeviceFlags(virDomainPtr dom,
+                          const char *xml,
+                          unsigned int flags)
+{
+    virCHDriver *driver = dom->conn->privateData;
+    virDomainObj *vm = NULL;
+    int ret = -1;
+
+    if (!(vm = virCHDomainObjFromDomain(dom)))
+        goto cleanup;
+
+    if (virDomainDetachDeviceFlagsEnsureACL(dom->conn, vm->def, flags) < 0)
+        goto cleanup;
+
+    if (virDomainObjBeginJob(vm, VIR_JOB_MODIFY) < 0)
+        goto cleanup;
+
+    if (virDomainObjUpdateModificationImpact(vm, &flags) < 0)
+        goto endjob;
+
+    if (chDomainDetachDeviceLiveAndConfig(driver, vm, xml, flags) < 0)
+        goto endjob;
+
+    ret = 0;
+
+ endjob:
+    virDomainObjEndJob(vm);
+
+ cleanup:
+    virDomainObjEndAPI(&vm);
+    return ret;
+}
+
+static int chDomainDetachDevice(virDomainPtr dom, const char *xml)
+{
+    return chDomainDetachDeviceFlags(dom, xml,
+                                     VIR_DOMAIN_AFFECT_LIVE);
+}
+
 /* Function Tables */
 static virHypervisorDriver chHypervisorDriver = {
     .name = "CH",
@@ -2437,6 +3017,10 @@ static virHypervisorDriver chHypervisorDriver = {
     .connectDomainEventRegisterAny = chConnectDomainEventRegisterAny,       /* 10.10.0 */
     .connectDomainEventDeregisterAny = chConnectDomainEventDeregisterAny,   /* 10.10.0 */
     .domainInterfaceAddresses = chDomainInterfaceAddresses, /* 11.0.0 */
+    .domainAttachDevice = chDomainAttachDevice, /* 11.4.0 */
+    .domainAttachDeviceFlags = chDomainAttachDeviceFlags, /* 11.4.0 */
+    .domainDetachDevice = chDomainDetachDevice, /* 11.4.0 */
+    .domainDetachDeviceFlags = chDomainDetachDeviceFlags, /* 11.4.0 */
 };
 
 static virConnectDriver chConnectDriver = {
