@@ -25,18 +25,39 @@
 #include "virchrdev.h"
 #include "vircgroup.h"
 #include "virdomainjob.h"
+#include "virthread.h"
 
+typedef struct _chMigrationDstArgs chMigrationDstArgs;
 
 typedef struct _virCHDomainObjPrivate virCHDomainObjPrivate;
 struct _virCHDomainObjPrivate {
     virChrdevs *chrdevs;
     virCHDriver *driver;
     virCHMonitor *monitor;
+    virThread *migrationDstReceiveThr;
+    chMigrationDstArgs *args;
     char *machineName;
     virBitmap *autoCpuset;
     virBitmap *autoNodeset;
     virCgroup *cgroup;
     char *pidfile;
+
+    /* Indicates a shutdown for this domain was already done. Used to
+     * synchronize shutdowns triggered via the API and shutdowns triggered by
+     * events.
+     */
+    int shutdown_done;
+};
+
+struct _chMigrationDstArgs {
+    unsigned int port;
+    virCHDomainObjPrivate *priv;
+    virDomainDef *def;
+    virCHDriver *driver;
+    virMutex mutex;
+    virCond cond;
+    volatile bool success;
+    char *tcp_serial_url;
 };
 
 #define CH_DOMAIN_PRIVATE(vm) \
@@ -50,6 +71,19 @@ struct _virCHDomainVcpuPrivate {
 
     pid_t tid; /* vcpu thread id */
     virTristateBool halted;
+};
+
+typedef enum {
+    CH_PROCESS_EVENT_MONITOR_EOF,
+    CH_PROCESS_EVENT_LAST
+} chProcessEventType;
+
+struct chProcessEvent {
+    virDomainObj *vm;
+    chProcessEventType eventType;
+    int action;
+    int status;
+    void *data;
 };
 
 #define CH_DOMAIN_VCPU_PRIVATE(vcpu) \
@@ -79,3 +113,7 @@ virCHDomainObjFromDomain(virDomainPtr domain);
 
 int
 virCHDomainValidateActualNetDef(virDomainNetDef *net);
+
+int
+virCHDomainJobGetTimeElapsed(virDomainJobObj *job,
+                             unsigned long long *timeElapsed);

@@ -23,6 +23,9 @@
 #include "ch_conf.h"
 #include "internal.h"
 
+int virCHProcessInit(virCHDriver *driver,
+                     virDomainObj *vm);
+
 int virCHProcessStart(virCHDriver *driver,
                       virDomainObj *vm,
                       virDomainRunningReason reason);
@@ -31,10 +34,16 @@ typedef enum {
     VIR_CH_PROCESS_STOP_FORCE = 1 << 0,
 } virCHProcessStopFlags;
 
+int virCHProcessInit(virCHDriver *driver,
+                     virDomainObj *vm);
+
 int virCHProcessStop(virCHDriver *driver,
                      virDomainObj *vm,
                      virDomainShutoffReason reason,
                      unsigned int flags);
+int virCHProcessKill(virCHDriver *driver,
+                     virDomainObj *vm,
+                     virDomainShutoffReason reason);
 
 int virCHProcessStartRestore(virCHDriver *driver,
                          virDomainObj *vm,
@@ -52,3 +61,9 @@ chProcessAddNetworkDevice(virCHDriver *driver,
 
 int
 chMonitorSocketConnect(virCHMonitor *mon);
+
+int
+virCHProcessInitCpuAffinity(virDomainObj *vm);
+
+int
+virCHProcessSetup(virDomainObj *vm);

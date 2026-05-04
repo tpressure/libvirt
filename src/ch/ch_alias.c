@@ -45,7 +45,6 @@ int chAssignDeviceDiskAlias(virDomainDiskDef *disk)
     }
 
     disk->info.alias = g_strdup_printf("%s-disk%d", prefix, idx);
-
     return 0;
 }
 
