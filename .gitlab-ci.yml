@@ -1,225 +1,443 @@
-variables:
-  GIT_DEPTH: 100
+workflow:
+  rules:
+    # For pushes, MRs, scheduled pipelines
+    - when: always
 
 stages:
-  - containers
-  - builds
-  - integration_tests
-  - sanity_checks
-  - pages
+  - lint
+  - build
+  - test
+  - post
+  - bump
 
-.script_variables: &script_variables |
-  export CCACHE_BASEDIR="$(pwd)"
-  export CCACHE_DIR="$CCACHE_BASEDIR/ccache"
-  export CCACHE_MAXSIZE="500M"
-  export PATH="$CCACHE_WRAPPERSDIR:$PATH"
-  export VIR_TEST_VERBOSE="1"
-  export VIR_TEST_DEBUG="1"
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+  CUSTOM_CI_IMAGE: $CI_REGISTRY_IMAGE/ci:$CI_COMMIT_REF_SLUG
+  XDG_CACHE_HOME: "$CI_PROJECT_DIR/.cache"
 
-include:
-  - '/ci/gitlab.yml'
-  - '/ci/integration.yml'
-
-.native_build_job:
-  extends: .gitlab_native_build_job
+.nix_build_template:
+  interruptible: true
+  tags:
+    - native-nix
+  before_script:
+    - git config --global --add url.${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/.insteadOf "git@${CI_SERVER_HOST}:"
+    - git config --global --add url.${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/.insteadOf "ssh://git@${CI_SERVER_HOST}/"
+    - unset NIX_PATH
   cache:
+    key: "${CI_PROJECT_ID}-${CI_PROJECT_NAME}-nix-cache"
     paths:
-      - ccache/
-    key: "$CI_JOB_NAME"
-  script:
-    - source ci/jobs.sh
-    - if test -x /usr/bin/rpmbuild && test "$RPM" != "skip";
-      then
-        run_rpmbuild;
-      else
-        run_build;
-        run_test;
-      fi
-  after_script:
-    - test "$CI_JOB_STATUS" != "success" && exit 1;
-    - if test -x /usr/bin/rpmbuild && test "$RPM" != "skip";
-      then
-        mv "$HOME"/rpmbuild/RPMS/x86_64/ libvirt-rpms/;
-      fi
+      - "$CI_PROJECT_DIR/.cache/nix"
 
-.cross_build_job:
-  extends: .gitlab_cross_build_job
-  cache:
-    paths:
-      - ccache/
-    key: "$CI_JOB_NAME"
-  script:
-    - source ci/jobs.sh
-    - if test -x /usr/bin/rpmbuild && test "$RPM" != "skip";
-      then
-        run_rpmbuild;
-      else
-        run_build;
-        if test "$CROSS" = "i686";
-        then
-          run_test;
-        fi;
-      fi
-
-# This artifact published by this job is downloaded by libvirt.org to
-# be deployed to the web root:
-#    https://gitlab.com/libvirt/libvirt/-/jobs/artifacts/master/download?job=website
-website_job:
-  extends: .gitlab_native_build_job
-  needs:
-    - job: x86_64-almalinux-9-container
-      optional: true
-  script:
-    - source ci/jobs.sh
-    - run_website_build
-  after_script:
-    - test "$CI_JOB_STATUS" != "success" && exit 1;
-    - mv install/usr/share/doc/libvirt/html/ website
-  artifacts:
-    expose_as: 'Website'
-    name: 'website'
-    when: on_success
-    expire_in: 30 days
-    paths:
-      - website
-  variables:
-    NAME: almalinux-9
-    TARGET_BASE_IMAGE: docker.io/library/almalinux:9
-
-# On push to master publish the website from 'website_job' via gitlab pages
-pages:
-  stage: pages
-  script:
-    - mv website public
-    - cp .gitlab_pages_redirects public/_redirects
-  dependencies:
-    - website_job
+.hardware_build_template:
+  extends:
+    - .nix_build_template
   rules:
-    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # Resource groups do not work across forks. However, we need the resource
+    # group to apply globally for the GitLab CI runner. As a workaround, we
+    # only run this job in the main repository (on pull requests). Once all
+    # forks were rebased, this change becomes effective.
+    - if: '$CI_PROJECT_PATH == "cyberus/cloud/libvirt"'
       when: always
     - when: never
+  variables:
+    PYTHONUNBUFFERED: "1"
+    TERM: "xterm"
+    DBG_LOG_DIR: "./logs"
   artifacts:
-    expose_as: 'pages'
-    name: 'pages'
-    paths:
-      - public
-
-codestyle_job:
-  stage: sanity_checks
-  extends: .gitlab_native_build_job
-  needs:
-    - job: x86_64-opensuse-leap-16-container
-      optional: true
-  script:
-    - source ci/jobs.sh
-    - run_codestyle
-  variables:
-    NAME: opensuse-leap-16
-    TARGET_BASE_IMAGE: registry.opensuse.org/opensuse/leap:16.0
-
-# This artifact published by this job is downloaded to push to Weblate
-# for translation usage:
-#    https://gitlab.com/libvirt/libvirt/-/jobs/artifacts/master/download?job=potfile
-potfile:
-  image: $CI_REGISTRY/$RUN_UPSTREAM_NAMESPACE/libvirt/ci-$NAME:latest
-  stage: builds
-  variables:
-    NAME: almalinux-9
-  before_script:
-    - cat /packages.txt
-    - *script_variables
-  needs:
-    - job: x86_64-almalinux-9-container
-      optional: true
-  rules:
-    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      when: on_success
-    - when: never
-  script:
-    - source ci/jobs.sh
-    - run_potfile
-  after_script:
-    - test "$CI_JOB_STATUS" != "success" && exit 1;
-    - cp po/libvirt.pot libvirt.pot
-  artifacts:
-    expose_as: 'Potfile'
-    name: 'potfile'
-    when: on_success
-    expire_in: 30 days
-    paths:
-      - libvirt.pot
-
-# Coverity job that is run only by schedules
-coverity:
-  image: $CI_REGISTRY/$RUN_UPSTREAM_NAMESPACE/libvirt/ci-$NAME:latest
-  stage: builds
-  needs:
-    - job: x86_64-almalinux-9-container
-      optional: true
-  before_script:
-    - cat /packages.txt
-  script:
-    - curl https://scan.coverity.com/download/cxx/linux64 --form project=$COVERITY_SCAN_PROJECT_NAME --form token=$COVERITY_SCAN_TOKEN -o /tmp/cov-analysis-linux64.tgz
-    - tar xfz /tmp/cov-analysis-linux64.tgz
-    - meson setup build --werror || (cat build/meson-logs/meson-log.txt && exit 1)
-    - cov-analysis-linux64-*/bin/cov-build --dir cov-int meson compile -C build
-    - tar cfz cov-int.tar.gz cov-int
-    - curl https://scan.coverity.com/builds?project=$COVERITY_SCAN_PROJECT_NAME --form token=$COVERITY_SCAN_TOKEN --form email=$GITLAB_USER_EMAIL --form file=@cov-int.tar.gz --form version="$(git describe --tags)" --form description="$(git describe --tags) / $CI_COMMIT_TITLE / $CI_COMMIT_REF_NAME:$CI_PIPELINE_ID"
-  variables:
-    NAME: almalinux-9
-  rules:
-    - if: '$COVERITY_SCAN_PROJECT_NAME == null || $COVERITY_SCAN_TOKEN == null'
-      when: never
-    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH'
-      when: on_success
-    - when: never
-
-# Check that we have CVE git tags for CVEs mentioned in commit messages and NEWS
-# and expose the list of CVE tags
-cve_tags:
-  image: $CI_REGISTRY/$RUN_UPSTREAM_NAMESPACE/libvirt/ci-$NAME:latest
-  variables:
-    NAME: almalinux-9
-    GIT_STRATEGY: clone
-    GIT_DEPTH: ""
-  stage: sanity_checks
-  needs:
-    - job: x86_64-almalinux-9-container
-      optional: true
-      artifacts: false
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-      when: always
-    - when: never
-  script:
-    # fetch list of git tags and exceptions
-    - git tag | grep -o 'CVE-[0-9]\+-[0-9]\+' | sort -u > cve-tags
-    - grep -o 'CVE-[0-9]\+-[0-9]\+' .cve_exceptions > cve-allowed-exceptions
-    - sort -u cve-tags cve-allowed-exceptions > cve-allowed
-    # lookup CVE ids in 'git-log'
-    - git log | grep -o '[Cc][Vv][Ee]-[0-9]\+-[0-9]\+' | sort -u > cves-found-log
-    - comm -2 -3 cves-found-log cve-allowed > cves-missing-tags-log
-    # lookup CVE ids in 'NEWS.rst'
-    - grep -o '[Cc][Vv][Ee]-[0-9]\+-[0-9]\+' NEWS.rst | sort -u > cves-found-news
-    - comm -2 -3 cves-found-news cve-allowed > cves-missing-tags-news
-    # lookup CVE ids in index of security notices
-    - curl -fsSL https://security.libvirt.org/index.xml | grep -o 'CVE-[0-9]\+-[0-9]\+' | sort -u > cves-found-notices
-    - comm -2 -3 cves-found-notices cve-allowed > cves-missing-tags-notices
-    - if [ -s cves-missing-tags-log ] || [ -s cves-missing-tags-news ] || [ -s cves-missing-tags-notices ];
-      then
-        echo "Following CVE's are either missing a git tag or an exception in '.cve_exceptions:";
-        echo "Source 'git log'";
-        cat cves-missing-tags-log;
-        echo "Source 'NEWS.rst'";
-        cat cves-missing-tags-news;
-        echo "Source 'security.libvirt.org/index.xml'";
-        cat cves-missing-tags-notices;
-        false;
-      fi
-  artifacts:
-    expose_as: 'CVE tags'
-    name: 'cve_tags'
+    expire_in: 1 week
     when: always
-    expire_in: 30 days
     paths:
-      - cve-tags
+      - logs/
+  # if you want to use your own before_script create a new before_script block in a real job section
+  # a before_script block in a job always overrides this definition - the yaml array is not cumulative
+  before_script:
+    # setup ssh key
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - umask 077
+    - cp "$SSH_KNOWN_HOSTS" ~/.ssh/known_hosts
+    - chmod 600 ~/.ssh/known_hosts
+    - cp "$SSH_PRIVATE_KEY" ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - cp "$SSH_PUBLIC_KEY" ~/.ssh/id_ed25519.pub
+    - chmod 600 ~/.ssh/id_ed25519.pub
+    # generate ssh client configuration file - you dont need all parameters in each ssh commnd line
+    - echo 'Host *' > ~/.ssh/config
+    - echo "  UserKnownHostsFile ${HOME}/.ssh/known_hosts" >> ~/.ssh/config
+    - echo "  User benchmark" >> ${HOME}/.ssh/config
+    - echo "  ConnectTimeout 5" >> ~/.ssh/config
+    - echo "  ServerAliveInterval 5" >> ~/.ssh/config
+    - echo "  ServerAliveCountMax 3" >> ~/.ssh/config
+    - echo "  BatchMode yes" >> ~/.ssh/config
+    - echo "  IdentityFile ${HOME}/.ssh/id_ed25519" >> ~/.ssh/config
+    - echo "  SendEnv CI_SERVER_PROTOCOL" >> ~/.ssh/config
+    - echo "  SendEnv CI_JOB_TOKEN" >> ~/.ssh/config
+    - echo "  SendEnv CI_SERVER_HOST" >> ~/.ssh/config
+    - echo "  SendEnv CI_COMMIT_REF_NAME" >> ~/.ssh/config
+    - echo "  SendEnv CI_PROJECT_NAME" >> ~/.ssh/config
+    - echo "  SendEnv CI_PROJECT_PATH" >> ~/.ssh/config
+    - echo "  SendEnv CI_JOB_ID" >> ~/.ssh/config
+    - echo "  SendEnv CI_PIPELINE_ID" >> ~/.ssh/config
+    - echo "  SendEnv CI_MERGE_REQUEST_SOURCE_PROJECT_PATH" >> ~/.ssh/config
+    - echo "  SendEnv TESTSUITE" >> ~/.ssh/config
+  # if you want to use your own after_script create a new after_script block in a real job section
+  # a after_script block in a job always overrides this definition - the yaml array is not cumulative
+  after_script:
+    - echo "Cleanup all VMs on each host"
+    - |
+      nix shell nixpkgs#{openssh,curl,jq} --command bash -c '
+        set -euo pipefail
+        ./local_tests/bare_metal_chv_cleanup.sh
+        echo "Cleanup all working directories on each host"
+        ssh -F ~/.ssh/config ferona-turin "rm -rf tmp-${CI_JOB_ID}" || true
+        ssh -F ~/.ssh/config ferona-granite-rapids "rm -rf tmp-${CI_JOB_ID}" || true
+        ssh -F ~/.ssh/config ferona-sapphire-rapids "rm -rf tmp-${CI_JOB_ID}" || true
+        echo "Clean shared nfs directory"
+        ssh -F ~/.ssh/config ferona-turin "rm -rf /exports/gitlab/${CI_JOB_ID}" || true
+      '
+
+lint:commit:
+  stage: lint
+  rules:
+      # Needed for TARGET_BRANCH below.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: always
+    - when: never
+  extends:
+    - .nix_build_template
+  variables:
+    GIT_DEPTH: "0"  # Ensures full Git history is fetched
+  script:
+    # Determine the target branch of the merge request
+    - TARGET_BRANCH=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-$CI_DEFAULT_BRANCH}
+    - echo "TARGET_BRANCH=$TARGET_BRANCH"
+    # Lint commit messages in the range from target branch to current HEAD
+    # We deliberately do a 'nix build' here before because it seems 'nix run'
+    # does not create a GC root entry which allows a nix garbage collection to
+    # remove depdendencies required for the test execution.
+    # See: https://github.com/cobaltcore-dev/cobaltcore/issues/594
+    - nix build nixpkgs#gitlint
+    - nix run nixpkgs#gitlint -- --commits origin/$TARGET_BRANCH..
+
+lint:nix-fmt:
+  stage: lint
+  extends:
+    - .nix_build_template
+  script:
+    - nix fmt -- --ci
+
+lint:nixos-tests:
+  stage: lint
+  extends:
+    - .nix_build_template
+  script:
+    # We run each check separately first, and at the end run all in case we forgot to add a check here.
+    - nix build -L .#checks.x86_64-linux.deadnix
+    - nix build -L .#checks.x86_64-linux.pythonFormat
+    - nix build -L .#checks.x86_64-linux.pythonLint
+    - nix build -L .#checks.x86_64-linux.pythonTypes
+    - nix build -L .#checks.x86_64-linux.typos
+    - nix flake check
+
+build:packages:
+  stage: build
+  rules:
+    - when: always
+  extends:
+    - .nix_build_template
+  # No dependency to lint stage.
+  dependencies: []
+  needs: []
+  script:
+    - nix build -L .#libvirt
+    - nix build -L .#libvirt-debugoptimized
+
+build:meson:
+  stage: build
+  rules:
+    - when: always
+  extends:
+    - .nix_build_template
+  # No dependency to lint stage.
+  dependencies: []
+  needs: []
+  script:
+    - nix develop . --command bash -c "meson setup build && meson compile -C build"
+
+build:nixos_tests:
+  stage: build
+  rules:
+    - when: always
+  extends:
+    - .nix_build_template
+  # No dependency to lint stage.
+  dependencies: []
+  needs: []
+  script:
+    - nix build -L .#tests.x86_64-linux.all_drivers
+
+.test_nixos_tests:
+  stage: test
+  rules:
+    # Resource groups do not work across forks. However, we need the resource
+    # group to apply globally for the GitLab CI runner. As a workaround, we
+    # only run this job in the main repository (on pull requests). Once all
+    # forks were rebased, this change becomes effective.
+    - if: '$CI_PROJECT_PATH == "cyberus/cloud/libvirt"'
+      when: always
+    - when: never
+  extends:
+    - .nix_build_template
+  variables:
+    PYTHONUNBUFFERED: "1"
+    TERM: "xterm"
+    DBG_LOG_DIR: "./logs"
+  artifacts:
+    expire_in: 1 week
+    when: always
+    paths:
+      - logs/
+  script:
+    # Create a unique tmp directory where the nixos test driver places the VM
+    # images. We must ensure to delete those directories, as they are currently
+    # not automatically cleaned up after the CI run finishes.
+    - TMPDIR=$(mktemp -d)
+    - export TMPDIR
+    - trap 'rm -rf "$TMPDIR"' EXIT
+    - mkdir "${DBG_LOG_DIR}"
+    # We deliberately do a 'nix build' here before because it seems 'nix run'
+    # does not create a GC root entry which allows a nix garbage collection to
+    # remove depdendencies required for the test execution.
+    # See: https://github.com/cobaltcore-dev/cobaltcore/issues/594
+    - nix build -L .#tests.x86_64-linux.$TEST_ATTR.passthru.no_port_forwarding.driver
+    - nix run -L .#tests.x86_64-linux.$TEST_ATTR.passthru.no_port_forwarding.driver 2>&1 | tee "${DBG_LOG_DIR}/nixos_driver.log"
+
+test:default-tests:
+  extends:
+    - .test_nixos_tests
+  variables:
+    TEST_ATTR: default
+
+test:live-migration-tests:
+  extends:
+    - .test_nixos_tests
+  variables:
+    TEST_ATTR: live_migration
+
+test:version_migration-tests:
+  extends:
+    - .test_nixos_tests
+  variables:
+    TEST_ATTR: version_migration
+
+test:hugepage-tests:
+  extends:
+    - .test_nixos_tests
+  variables:
+    TEST_ATTR: hugepage
+
+test:numa-host-tests:
+  extends:
+    - .test_nixos_tests
+  variables:
+    TEST_ATTR: numa_hosts
+
+test:default-windows-tests:
+  extends:
+    - .test_nixos_tests
+  variables:
+    TEST_ATTR: windows
+
+# the cpu profile test requires the appropriate hardware
+test:cpu_profiles:
+  stage: test
+  resource_group: ferona-hardware
+  timeout: "15 minutes"
+  extends:
+    - .hardware_build_template
+  parallel:
+    matrix:
+      - TESTSUITE: run_cpu_profile_test.sh
+        TARGETHOST:
+          - ferona-sapphire-rapids
+          - ferona-granite-rapids
+  script:
+    - rm -rf logs && mkdir logs
+    - |
+      nix shell nixpkgs#openssh --command bash -c '
+        set -euo pipefail
+        ./local_tests/checkout_repo_remote.sh ${TARGETHOST}
+        ./local_tests/run_remote.sh ${TARGETHOST} "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/${TESTSUITE} ${CI_JOB_ID} ${CI_PROJECT_NAME}" 2>&1 | tee logs/${TARGETHOST}.log
+      '
+  after_script:
+    - |
+      nix shell nixpkgs#openssh --command bash -c '
+        set -euo pipefail
+        ssh -F ~/.ssh/config ${TARGETHOST} "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/cleanup_remote.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} ${TESTSUITE}" || true
+        # ssh -F ~/.ssh/config ${TARGETHOST} "rm -rf tmp-${CI_JOB_ID}" || true
+      '
+
+test:bm:linux:live-mig:
+  stage: test
+  resource_group: ferona-hardware-tap15
+  timeout: "15 minutes"
+  extends:
+    - .hardware_build_template
+  script:
+    - rm -rf logs && mkdir logs
+    - |
+      nix shell nixpkgs#openssh --command bash -c '
+        set -euo pipefail
+        # checkout repo on each host
+        ./local_tests/checkout_repo_remote.sh ferona-turin
+        ./local_tests/checkout_repo_remote.sh ferona-granite-rapids
+        ./local_tests/checkout_repo_remote.sh ferona-sapphire-rapids
+        # prepare image on nfs server host
+        ssh -F ~/.ssh/config ferona-turin "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_images.sh ${CI_JOB_ID} tap15"  2>&1 | tee -a logs/ferona-turin.log
+        # build CHV on each host
+        ssh -F ~/.ssh/config ferona-granite-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME}"
+        ssh -F ~/.ssh/config ferona-sapphire-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME}"
+        # build vm and run live migration
+        ./local_tests/run_chv_profile_test.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} "tap15"
+      '
+
+test:bm:linux:live-mig-prev-version:
+  stage: test
+  resource_group: ferona-hardware-tap16
+  timeout: "15 minutes"
+  extends:
+    - .hardware_build_template
+  script:
+    - rm -rf logs && mkdir logs
+    - |
+      nix shell nixpkgs#openssh --command bash -c '
+        set -euo pipefail
+        # checkout repo on each host
+        ./local_tests/checkout_repo_remote.sh ferona-turin
+        ./local_tests/checkout_repo_remote.sh ferona-granite-rapids
+        ./local_tests/checkout_repo_remote.sh ferona-sapphire-rapids
+        # prepare image on nfs server host
+        ssh -F ~/.ssh/config ferona-turin "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_images.sh ${CI_JOB_ID} tap16" 2>&1 | tee -a logs/ferona-turin.log
+        # build previous version on this host
+        ssh -F ~/.ssh/config ferona-granite-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} prev"
+        # build current version on this host
+        ssh -F ~/.ssh/config ferona-sapphire-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME}"
+        # build vm and run live migration
+        # remove the v51 paramter if the previous version of CHV >= v52
+        ./local_tests/run_chv_profile_test.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} "tap16" "v51"
+      '
+
+test:bm:windows:live-mig:
+  stage: test
+  resource_group: ferona-hardware-tap10
+  timeout: "15 minutes"
+  extends:
+    - .hardware_build_template
+  script:
+    - rm -rf logs && mkdir logs
+    - |
+      nix shell nixpkgs#openssh --command bash -c '
+        set -euo pipefail
+        set -x
+        # checkout repo on each host
+        ./local_tests/checkout_repo_remote.sh ferona-turin
+        ./local_tests/checkout_repo_remote.sh ferona-granite-rapids
+        ./local_tests/checkout_repo_remote.sh ferona-sapphire-rapids
+        # prepare image on nfs server host
+        ssh -F ~/.ssh/config ferona-turin "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_windows_image.sh ${CI_JOB_ID}" 2>&1 | tee -a logs/ferona-turin.log
+        # build CHV on each host
+        ssh -F ~/.ssh/config ferona-granite-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME}"
+        ssh -F ~/.ssh/config ferona-sapphire-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME}"
+        # build vm and run live migration
+        # ./local_tests/run_chv_profile_test_windows.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} "<tap-device-name>" "chv-version: current | previous" "multi-queue-enable"
+        ./local_tests/run_chv_profile_test_windows.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} "tap10" "current" "false"
+      '
+test:bm:windows:mq:
+  stage: test
+  resource_group: ferona-hardware-tap20
+  timeout: "15 minutes"
+  extends:
+    - .hardware_build_template
+  script:
+    - rm -rf logs && mkdir logs
+    - |
+      nix shell nixpkgs#openssh --command bash -c '
+        set -euo pipefail
+        set -x
+        # checkout repo on each host
+        ./local_tests/checkout_repo_remote.sh ferona-turin
+        ./local_tests/checkout_repo_remote.sh ferona-granite-rapids
+        ./local_tests/checkout_repo_remote.sh ferona-sapphire-rapids
+        # prepare image on nfs server host
+        ssh -F ~/.ssh/config ferona-turin "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_windows_image.sh ${CI_JOB_ID}" 2>&1 | tee -a logs/ferona-turin.log
+        # build CHV on each host
+        ssh -F ~/.ssh/config ferona-granite-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME}"
+        ssh -F ~/.ssh/config ferona-sapphire-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME}"
+        # build vm and run live migration
+        # ./local_tests/run_chv_profile_test_windows.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} "<tap-device-name>" "chv-version: current | v51" "multi-queue-enable"
+        ./local_tests/run_chv_profile_test_windows.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} "tap20" "current" "true"
+      '
+
+test:bm:windows:live-mig-prev-version:
+  stage: test
+  resource_group: ferona-hardware-tap11
+  timeout: "15 minutes"
+  extends:
+    - .hardware_build_template
+  script:
+    - rm -rf logs && mkdir logs
+    - |
+      nix shell nixpkgs#openssh --command bash -c '
+        set -euo pipefail
+        set -x
+        # checkout repo on each host
+        ./local_tests/checkout_repo_remote.sh ferona-turin
+        ./local_tests/checkout_repo_remote.sh ferona-granite-rapids
+        ./local_tests/checkout_repo_remote.sh ferona-sapphire-rapids
+        # prepare image on nfs server host
+        ssh -F ~/.ssh/config ferona-turin "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_windows_image.sh ${CI_JOB_ID}" 2>&1 | tee -a logs/ferona-turin.log
+        # build previous version on this host
+        ssh -F ~/.ssh/config ferona-granite-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} prev"
+        # build current version on this host
+        ssh -F ~/.ssh/config ferona-sapphire-rapids "./tmp-${CI_JOB_ID}/${CI_PROJECT_NAME}/local_tests/run_chv_profile_prepare_chv.sh ${CI_JOB_ID} ${CI_PROJECT_NAME}"
+        # build vm and run live migration
+        # ./local_tests/run_chv_profile_test_windows.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} "<tap-device-name>" "chv-version: current | v51" "multi-queue-enable"
+        ./local_tests/run_chv_profile_test_windows.sh ${CI_JOB_ID} ${CI_PROJECT_NAME} "tap11" "v51" "false"
+      '
+
+# this post job should always run
+# the test stage job may run into an error and a pipeline timeout
+# then this job removes all leftovers from the previos stage
+post:bm:live-migration-cleanup:
+  stage: post
+  timeout: "5 minutes"
+  extends:
+    - .hardware_build_template
+  script:
+    - echo "Cleanup all VMs on each host"
+    - |
+      nix shell nixpkgs#{openssh,curl,jq} --command bash -c '
+        set -euo pipefail
+        ./local_tests/bare_metal_chv_cleanup.sh all || true
+        echo "Cleanup all working directories on each host"
+        ssh -F ~/.ssh/config ferona-turin "rm -rf tmp-${CI_JOB_ID}" || true
+        ssh -F ~/.ssh/config ferona-granite-rapids "rm -rf tmp-${CI_JOB_ID}" || true
+        ssh -F ~/.ssh/config ferona-sapphire-rapids "rm -rf tmp-${CI_JOB_ID}" || true
+        echo "Clean shared nfs directory"
+        ssh -F ~/.ssh/config ferona-turin "rm -rf /exports/gitlab/${CI_JOB_ID}" || true
+      '
+  after_script: []
+
+# please look into: ci/README.auto.approve.md
+bump:auto-approve:
+  stage: bump
+  extends:
+    - .nix_build_template
+  variables:
+    GIT_DEPTH: "0"  # Ensures full Git history is fetched
+  rules:
+    - if: ($CI_PIPELINE_SOURCE == "merge_request_event" && $CI_PROJECT_PATH == "cyberus/cloud/libvirt")
+      changes:
+        - flake.lock
+  script:
+    - nix-shell -p curl --run './ci/auto_approve.sh'
