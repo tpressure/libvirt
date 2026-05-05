@@ -199,9 +199,9 @@ virCHDriverConfigNew(bool privileged)
     }
 
     /* TODO: read this from ch.conf rather than deriving it from the
-     * configuration directory. */
+     * driver configuration directory. */
     cfg->migrateTLSx509certdir = g_strdup_printf("%s/pki",
-                                                 cfg->configFileDir);
+                                                 cfg->configDir);
 
     return cfg;
 }
