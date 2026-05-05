@@ -41,6 +41,7 @@
 #define URL_VM_ADD_DISK "vm.add-disk"
 #define URL_VM_REMOVE_DEVICE "vm.remove-device"
 #define URL_VM_RESIZE_DISK "vm.resize-disk"
+#define URL_VM_SEND_MIGRATION "vm.send-migration"
 #define URL_VM_MIGRATION_PROGRESS "vm.migration-progress"
 #define URL_VM_MIGRATION_CANCEL "vm.cancel-migration"
 

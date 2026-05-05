@@ -27,6 +27,7 @@
 #include <curl/curl.h>
 
 #include "ch_conf.h"
+#include "ch_alias.h"
 #include "ch_domain.h"
 #include "ch_events.h"
 #include "ch_interface.h"
@@ -34,6 +35,7 @@
 #include "ch_pci_addr.h"
 #include "ch_socket.h"
 #include "domain_interface.h"
+#include "domain_logcontext.h"
 #include "libvirt/libvirt.h"
 #include "numa_conf.h"
 #include "viralloc.h"
@@ -74,6 +76,35 @@ VIR_ENUM_IMPL(virCHMigrationTransportMode,
               /* naming corresponds to serde JSON deserialization from Rust */
               "Local",
               "Tcp",);
+
+static int
+virCHMonitorAppendRestoreNetJson(virDomainDef *vmdef,
+                                 virJSONValue *nets,
+                                 size_t idx)
+{
+    g_autoptr(virJSONValue) net_json = virJSONValueNewObject();
+    virDomainNetDef *net = vmdef->nets[idx];
+
+    if (!net->info.alias)
+        chAssignDeviceNetAlias(vmdef, net);
+
+    if (net->driver.virtio.queues == 0) {
+        /* "queues" here refers to queue pairs. When 0, initialize
+         * queue pairs to 1.
+         */
+        net->driver.virtio.queues = 1;
+    }
+
+    if (virJSONValueObjectAppendString(net_json, "id", net->info.alias) < 0)
+        return -1;
+    if (virJSONValueObjectAppendNumberInt(net_json, "num_fds",
+                                          net->driver.virtio.queues) < 0)
+        return -1;
+    if (virJSONValueArrayAppend(nets, &net_json) < 0)
+        return -1;
+
+    return 0;
+}
 
 static virClass *virCHMonitorClass;
 static void virCHMonitorDispose(void *obj);
@@ -509,7 +540,7 @@ virCHMonitorBuildDiskJson(virDomainDiskDef *diskdef)
 
     if (!disk) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "Failed to allocate memory for disk JSON!");
-        return -1;
+        return NULL;
     }
 
     switch (diskdef->src->type) {
@@ -685,7 +716,6 @@ virCHMonitorBuildRngJson(virJSONValue *content, virDomainDef *vmdef)
 int
 virCHMonitorBuildNetJson(virDomainNetDef *net,
                          char **jsonstr,
-                         bool hyperv_enabled)
                          bool hyperv_enabled)
 {
     char macaddr[VIR_MAC_STRING_BUFLEN];
@@ -1524,7 +1554,7 @@ virCHMonitorPut(virCHMonitor *mon,
         payload_str = virJSONValueToString(payload, false);
 
     response = virCHMonitorRequest(mon, endpoint, payload_str, "PUT",
-                                   answer != NULL);
+                                   answer != NULL, true);
 
     if (response.code != 200 && response.code != 204) {
         virJSONValueFree(response.json);
@@ -1729,20 +1759,6 @@ virCHMonitorSaveVM(virCHMonitor *mon,
     return (http_response.code == 200 || http_response.code == 204) ? 0 : -1;
 }
 
-int virCHMonitorRemoveDevice(virCHMonitor *mon,
-                             const char* device_id)
-{
-    HttpResponse http_response = {0};
-    g_autofree char *payload = NULL;
-
-    if (virCHMonitorBuildKeyValueStringJson(&payload, "id", device_id) != 0)
-        return -1;
-
-    http_response = virCHMonitorRequest(mon, URL_VM_REMOVE_DEVICE, payload, "PUT", false, true);
-
-    return (http_response.code == 200 || http_response.code == 204) ? 0 : -1;
-}
-
 int virCHMonitorMigrationSend(virCHMonitor *mon,
                               const char *dst_uri,
                               unsigned parallel_connections,
@@ -1904,7 +1920,6 @@ int virCHMonitorMigrationReceive(virCHMonitor *mon,
     g_auto(virBuffer) buf = VIR_BUFFER_INITIALIZER;
     g_auto(virBuffer) http_headers = VIR_BUFFER_INITIALIZER;
     size_t payload_len;
-    g_autoptr(virJSONValue) net_json = NULL;
     int rc = 0;
 
     DBG("In virCHMonitorMigrationReceive");
@@ -1943,32 +1958,8 @@ int virCHMonitorMigrationReceive(virCHMonitor *mon,
     if (vmdef->nnets) {
         g_autoptr(virJSONValue) nets = virJSONValueNewArray();
         for (i = 0; i < vmdef->nnets; i++) {
-            g_autofree char *id = NULL;
-            // This is set to 0 in domain_conf.c always. Figure out how to
-            // handle this properly!
-            if (vmdef->nets[i]->driver.virtio.queues == 0) {
-                /* "queues" here refers to queue pairs. When 0, initialize
-                * queue pairs to 1.
-                */
-                vmdef->nets[i]->driver.virtio.queues = 1;
-            }
-            net_json = virJSONValueNewObject();
-            // TODO switch to chAssignDeviceNetAlias from ch_alias.c
-            id = g_strdup_printf("%s_%zu", CH_NET_ID_PREFIX, i);
-            vmdef->nets[i]->info.alias = g_strdup_printf("%s", id);
-
-            if (virJSONValueObjectAppendString(net_json, "id", id) < 0) {
-                DBG("virJSONValueObjectAppendString failed for id");
-                rc = -1;
-                goto err;
-            }
-            if (virJSONValueObjectAppendNumberInt(net_json, "num_fds", vmdef->nets[i]->driver.virtio.queues)) {
-                DBG("virJSONValueObjectAppendNumberInt failed for num_fds");
-                rc = -1;
-                goto err;
-            }
-            if (virJSONValueArrayAppend(nets, &net_json) < 0) {
-                DBG("virJSONValueObjectAppend failed for net_json");
+            if (virCHMonitorAppendRestoreNetJson(vmdef, nets, i) < 0) {
+                DBG("virCHMonitorAppendRestoreNetJson failed");
                 rc = -1;
                 goto err;
             }
@@ -2102,23 +2093,7 @@ virCHMonitorBuildRestoreJson(virDomainDef *vmdef,
     if (vmdef->nnets) {
         g_autoptr(virJSONValue) nets = virJSONValueNewArray();
         for (i = 0; i < vmdef->nnets; i++) {
-            g_autoptr(virJSONValue) net_json = virJSONValueNewObject();
-            g_autofree char *id = g_strdup_printf("%s_%zu", CH_NET_ID_PREFIX, i);
-
-            // This is set to 0 in domain_conf.c always. Figure out how to
-            // handle this properly!
-            if (vmdef->nets[i]->driver.virtio.queues == 0) {
-                /* "queues" here refers to queue pairs. When 0, initialize
-                 * queue pairs to 1.
-                 */
-                vmdef->nets[i]->driver.virtio.queues = 1;
-            }
-
-            if (virJSONValueObjectAppendString(net_json, "id", id) < 0)
-                return -1;
-            if (virJSONValueObjectAppendNumberInt(net_json, "num_fds", vmdef->nets[i]->driver.virtio.queues))
-                return -1;
-            if (virJSONValueArrayAppend(nets, &net_json) < 0)
+            if (virCHMonitorAppendRestoreNetJson(vmdef, nets, i) < 0)
                 return -1;
         }
         if (virJSONValueObjectAppend(restore_json, "net_fds", &nets))

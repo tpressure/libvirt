@@ -1764,6 +1764,7 @@ static int chStateCleanup(void)
     if (ch_driver == NULL)
         return -1;
 
+    virThreadPoolFree(ch_driver->workerPool);
     virBitmapFree(ch_driver->chCaps);
     virSysinfoDefFree(ch_driver->hostsysinfo);
     virObjectUnref(ch_driver->config);
@@ -1772,8 +1773,8 @@ static int chStateCleanup(void)
     virObjectUnref(ch_driver->domains);
     virObjectUnref(ch_driver->hostdevMgr);
     virObjectUnref(ch_driver->domainEventState);
-    virObjectUnref(ch_driver->migrationPorts);
-    virObjectUnref(ch_driver->inhibitor);
+    virPortAllocatorRangeFree(ch_driver->migrationPorts);
+    virInhibitorFree(ch_driver->inhibitor);
     virMutexDestroy(&ch_driver->lock);
     g_clear_pointer(&ch_driver, g_free);
 
@@ -3357,7 +3358,7 @@ chDomainMigratePrepare3(virConnectPtr dconn,
     virMutexDestroy(&args->mutex);
 
  err_cleanup_process_init:
-    virCHProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_CRASHED);
+    virCHProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_CRASHED, 0);
 
  err_cleanup_job_start:
     virDomainObjEndAsyncJob(vm);
@@ -4087,6 +4088,7 @@ chDomainAttachDeviceFlags(virDomainPtr dom,
     return ret;
 }
 
+static int
 chDomainAttachDevice(virDomainPtr dom,
                      const char *xml)
 {
@@ -4172,12 +4174,18 @@ chConnectDomainEventDeregister(virConnectPtr conn,
 static int
 chStateShutdownPrepare(void)
 {
+    if (ch_driver)
+        virThreadPoolStop(ch_driver->workerPool);
+
     return 0;
 }
 
 static int
 chStateShutdownWait(void)
 {
+    if (ch_driver)
+        virThreadPoolDrain(ch_driver->workerPool);
+
     return 0;
 }
 
