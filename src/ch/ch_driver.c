@@ -210,6 +210,9 @@ chDomainCreateXML(virConnectPtr conn,
     virDomainPtr dom = NULL;
     unsigned int parse_flags = VIR_DOMAIN_DEF_PARSE_INACTIVE;
     g_autofree char *managed_save_path = NULL;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+
+    cfg = virCHDriverGetConfig(driver);
 
     virCheckFlags(VIR_DOMAIN_START_VALIDATE, NULL);
 
@@ -252,6 +255,9 @@ chDomainCreateXML(virConnectPtr conn,
     if (virCHProcessStart(driver, vm, VIR_DOMAIN_RUNNING_BOOTED) < 0)
         goto endjob;
 
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+
     dom = virGetDomain(conn, vm->def->name, vm->def->uuid, vm->def->id);
 
  endjob:
@@ -272,7 +278,10 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
     virDomainObj *vm;
     virCHDomainObjPrivate *priv;
     g_autofree char *managed_save_path = NULL;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
     int ret = -1;
+
+    cfg = virCHDriverGetConfig(driver);
 
     virCheckFlags(0, -1);
 
@@ -320,6 +329,11 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
                                                   VIR_DOMAIN_EVENT_STARTED_BOOTED);
         virObjectEventStateQueue(driver->domainEventState, event);
     }
+
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+
+    vm->newDef = virDomainObjCopyPersistentDef(vm, driver->xmlopt, NULL);
 
  endjob:
     virDomainObjEndJob(vm);
@@ -519,8 +533,13 @@ chDomainShutdownFlags(virDomainPtr dom,
     virCHDomainObjPrivate *priv;
     virDomainObj *vm;
     virDomainState state;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+    virCHDriver *driver = dom->conn->privateData;
     int ret = -1;
 
+    cfg = virCHDriverGetConfig(driver);
+
+    VIR_DEBUG("chDomainShutdown");
     virCheckFlags(VIR_DOMAIN_SHUTDOWN_ACPI_POWER_BTN, -1);
 
     if (!(vm = virCHDomainObjFromDomain(dom)))
@@ -543,7 +562,11 @@ chDomainShutdownFlags(virDomainPtr dom,
                        _("only can shutdown running/paused domain"));
         goto endjob;
     } else {
-        if (virCHMonitorShutdownVM(priv->monitor) < 0) {
+        /* if (virCHMonitorShutdownVM(priv->monitor) < 0) { */
+        // FIXME: we currently have to shutdown the VMM instead of "only" the VM
+        // here because CHV does not release the network file descriptors
+        // when we send vm.shutdown. We need to fix this in CHV.
+        if (virCHMonitorShutdownVMM(priv->monitor) < 0) {
             virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                         _("failed to shutdown guest VM"));
             goto endjob;
@@ -551,6 +574,12 @@ chDomainShutdownFlags(virDomainPtr dom,
     }
 
     virDomainObjSetState(vm, VIR_DOMAIN_SHUTDOWN, VIR_DOMAIN_SHUTDOWN_USER);
+
+    virDomainObjRemoveTransientDef(vm);
+
+    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
+        goto endjob;
+    }
 
     ret = 0;
 
@@ -611,6 +640,11 @@ chDomainReboot(virDomainPtr dom, unsigned int flags)
     else
         virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_UNPAUSED);
 
+    if (virDomainObjSave(vm, priv->driver->xmlopt,
+                         virCHDriverGetConfig(priv->driver)->stateDir) < 0) {
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    }
+
     ret = 0;
 
  endjob:
@@ -655,6 +689,11 @@ chDomainSuspend(virDomainPtr dom)
     }
 
     virDomainObjSetState(vm, VIR_DOMAIN_PAUSED, VIR_DOMAIN_PAUSED_USER);
+
+    if (virDomainObjSave(vm, priv->driver->xmlopt,
+                         virCHDriverGetConfig(priv->driver)->stateDir) < 0) {
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    }
 
     ret = 0;
 
@@ -701,6 +740,11 @@ chDomainResume(virDomainPtr dom)
 
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_UNPAUSED);
 
+    if (virDomainObjSave(vm, priv->driver->xmlopt,
+                         virCHDriverGetConfig(priv->driver)->stateDir) < 0) {
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    }
+
     ret = 0;
 
  endjob:
@@ -727,6 +771,7 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
     virDomainObj *vm;
     virObjectEvent *event = NULL;
     unsigned int stopFlags = 0;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret = -1;
 
     virCheckFlags(VIR_DOMAIN_DESTROY_GRACEFUL, -1);
@@ -748,6 +793,12 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
 
     if (virCHProcessStop(driver, vm,
                          VIR_DOMAIN_SHUTOFF_DESTROYED, stopFlags) < 0) {
+        goto endjob;
+    }
+
+    virDomainObjRemoveTransientDef(vm);
+
+    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
         goto endjob;
     }
 
@@ -1189,7 +1240,10 @@ chDomainRestoreFlags(virConnectPtr conn,
     virDomainObj *vm = NULL;
     virCHDomainObjPrivate *priv;
     g_autoptr(virDomainDef) def = NULL;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
     int ret = -1;
+
+    cfg = virCHDriverGetConfig(driver);
 
     virCheckFlags(0, -1);
 
@@ -1227,6 +1281,10 @@ chDomainRestoreFlags(virConnectPtr conn,
         goto endjob;
     }
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_RESTORED);
+
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+
     ret = 0;
 
  endjob:
