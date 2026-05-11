@@ -26,6 +26,7 @@
 
 #include "ch_alias.h"
 #include "ch_domain.h"
+#include "ch_events.h"
 #include "ch_monitor.h"
 #include "ch_process.h"
 #include "domain_cgroup.h"
@@ -508,7 +509,7 @@ virCHProcessSetup(virDomainObj *vm)
  *
  * Returns socket fd on success, -1 on error
  */
-static int
+int
 chMonitorSocketConnect(virCHMonitor *mon)
 {
     struct sockaddr_un server_addr = { };
@@ -775,6 +776,13 @@ virCHRestoreCreateNetworkDevices(virCHDriver *driver,
     size_t index_vmtapfds;
     for (i = 0; i < vmdef->nnets; i++) {
         g_autofree int *tapfds = NULL;
+
+        if (vmdef->nets[i]->driver.virtio.queues == 0) {
+            /* "queues" here refers to queue pairs. When 0, initialize
+             * queue pairs to 1.
+             */
+            vmdef->nets[i]->driver.virtio.queues = 1;
+        }
         tapfd_len = vmdef->nets[i]->driver.virtio.queues;
         if (virCHDomainValidateActualNetDef(vmdef->nets[i]) < 0) {
             virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
@@ -1137,6 +1145,9 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
     g_autoptr(domainLogContext) logCtxt = NULL;
     int logfile = -1;
 
+    if (virDomainObjSetDefTransient(driver->xmlopt, vm, NULL) < 0)
+        return -1;
+
     VIR_DEBUG("Creating domain log file for %s domain", vm->def->name);
     if (!(logCtxt = domainLogContextNew(cfg->stdioLogD, cfg->logDir,
                                         CH_DRIVER_NAME,
@@ -1146,6 +1157,12 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
         return -1;
     }
     logfile = domainLogContextGetWriteFD(logCtxt);
+
+    if (virCHProcessPrepareDomain(vm) < 0)
+        return -1;
+
+    if (virCHProcessPrepareHost(driver, vm) < 0)
+        return -1;
 
     if (!priv->monitor) {
         /* Get the first monitor connection if not already */
@@ -1218,4 +1235,96 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
                          VIR_DOMAIN_SHUTOFF_FAILED,
                          VIR_CH_PROCESS_STOP_FORCE);
     return ret;
+}
+
+
+/* Return 1 for stale status, 0 for a reconnected guest, and -1 on error.
+ * The caller holds the domain lock; no APIs can run during driver startup.
+ */
+int
+virCHProcessReconnect(virCHDriver *driver, virDomainObj *vm)
+{
+    virCHDomainObjPrivate *priv = vm->privateData;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
+    g_autoptr(virJSONValue) info = NULL;
+    g_autofree char *emulator = NULL;
+    const char *state;
+    pid_t pid = -1;
+    int rc;
+
+    if (vm->pid <= 0 ||
+        (virProcessKill(vm->pid, 0) < 0 && errno == ESRCH)) {
+        virCHProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_UNKNOWN,
+                         VIR_CH_PROCESS_STOP_FORCE);
+        return 1;
+    }
+
+    priv->pidfile = virPidFileBuildPath(cfg->stateDir, vm->def->name);
+    /* virCommand resolves bare emulator names through PATH at startup. */
+    if (!(emulator = g_find_program_in_path(vm->def->emulator))) {
+        virReportError(VIR_ERR_OPERATION_FAILED,
+                       _("Cannot find emulator '%1$s' for domain '%2$s'"),
+                       vm->def->emulator, vm->def->name);
+        return -1;
+    }
+
+    rc = virPidFileReadPath(priv->pidfile, &pid);
+    if (rc < 0) {
+        virReportSystemError(-rc, _("Cannot read PID file '%1$s'"), priv->pidfile);
+        return -1;
+    }
+    if (virPidFileReadPathIfAlive(priv->pidfile, &pid, emulator) < 0) {
+        virReportError(VIR_ERR_OPERATION_FAILED,
+                       _("Cannot verify process in PID file '%1$s' against executable '%2$s'"),
+                       priv->pidfile, emulator);
+        return -1;
+    }
+    if (pid != vm->pid) {
+        virReportError(VIR_ERR_OPERATION_FAILED,
+                       _("PID file does not match running domain '%1$s'"),
+                       vm->def->name);
+        return -1;
+    }
+
+    if (!(priv->monitor = virCHMonitorReattach(vm, cfg)))
+        return -1;
+
+    if (virCHMonitorGetInfo(priv->monitor, &info) < 0)
+        return -1;
+
+    state = virJSONValueObjectGetString(info, "state");
+    if (STREQ_NULLABLE(state, "Running")) {
+        virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_UNKNOWN);
+    } else if (STREQ_NULLABLE(state, "Paused")) {
+        virDomainObjSetState(vm, VIR_DOMAIN_PAUSED, VIR_DOMAIN_PAUSED_UNKNOWN);
+    } else {
+        virReportError(VIR_ERR_OPERATION_FAILED,
+                       _("Cannot reconnect domain '%1$s' in its current state"),
+                       vm->def->name);
+        return -1;
+    }
+
+    priv->machineName = virCHDomainGetMachineName(vm);
+    if (virDomainCgroupConnectCgroup("ch", vm, &priv->cgroup,
+                                     cfg->cgroupControllers, driver->privileged,
+                                     priv->machineName) < 0)
+        return -1;
+
+    virCHDomainRefreshThreadInfo(vm);
+    if (!virCHDomainHasVcpuPids(vm)) {
+        virReportError(VIR_ERR_OPERATION_FAILED,
+                       _("Cannot recover vCPU threads for domain '%1$s'"),
+                       vm->def->name);
+        return -1;
+    }
+
+    if (virHostdevUpdateActiveDomainDevices(driver->hostdevMgr, CH_DRIVER_NAME,
+                                             vm->def, VIR_HOSTDEV_SP_PCI) < 0)
+        return -1;
+
+    if (virCHStartEventHandler(priv->monitor) < 0)
+        return -1;
+
+    virCHDomainSaveStatus(vm);
+    return 0;
 }
