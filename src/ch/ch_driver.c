@@ -21,6 +21,7 @@
 #include <config.h>
 #include <fcntl.h>
 
+#include "configmake.h"
 #include "ch_capabilities.h"
 #include "ch_conf.h"
 #include "ch_domain.h"
@@ -1493,7 +1494,10 @@ chStateInitialize(bool privileged,
     if (!(ch_driver->config = virCHDriverConfigNew(privileged)))
         goto cleanup;
 
-    driverConf = g_strdup_printf("%s/ch.conf", ch_driver->config->configDir);
+    if (privileged)
+        driverConf = g_strdup(SYSCONFDIR "/libvirt/ch.conf");
+    else
+        driverConf = g_strdup_printf("%s/ch.conf", ch_driver->config->configDir);
 
     if (virCHDriverConfigLoadFile(ch_driver->config, driverConf) < 0)
         goto cleanup;

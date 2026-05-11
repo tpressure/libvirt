@@ -52,6 +52,8 @@ struct _virCHDriverConfig {
 
     char *stateDir;
     char *configDir;
+    char *autostartDir;
+
     char *logDir;
     char *saveDir;
 

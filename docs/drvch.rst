@@ -44,6 +44,12 @@ of the file depends on the connection URI, as follows:
 If ``$XDG_CONFIG_HOME`` is not set in the environment, it defaults to
 ``$HOME/.config``.
 
+Persistent domain definitions are stored separately from the daemon
+configuration: in ``/var/lib/libvirt/ch`` for ``ch:///system`` and in
+``$XDG_CONFIG_HOME/libvirt/ch`` for ``ch:///session``. Active domain status
+is stored in the driver's runtime directory and is used to reconnect to
+guests after a daemon restart.
+
 Example guest domain XML configurations
 ---------------------------------------
 
