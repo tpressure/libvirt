@@ -300,6 +300,7 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
             goto endjob;
         }
         virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_RESTORED);
+        virCHDomainSaveStatus(vm);
         /* cleanup the save dir after restore */
         if (virFileDeleteTree(managed_save_path) < 0) {
             virReportSystemError(errno,
@@ -552,7 +553,10 @@ chDomainShutdownFlags(virDomainPtr dom,
                        _("only can shutdown running/paused domain"));
         goto endjob;
     } else {
-        if (virCHMonitorShutdownVM(priv->monitor) < 0) {
+        /* Shut down the VMM because CH does not release the network
+         * file descriptors in response to vm.shutdown.
+         */
+        if (virCHMonitorShutdownVMM(priv->monitor) < 0) {
             virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                         _("failed to shutdown guest VM"));
             goto endjob;
@@ -560,6 +564,8 @@ chDomainShutdownFlags(virDomainPtr dom,
     }
 
     virDomainObjSetState(vm, VIR_DOMAIN_SHUTDOWN, VIR_DOMAIN_SHUTDOWN_USER);
+
+    virCHDomainSaveStatus(vm);
 
     ret = 0;
 
@@ -620,6 +626,8 @@ chDomainReboot(virDomainPtr dom, unsigned int flags)
     else
         virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_UNPAUSED);
 
+    virCHDomainSaveStatus(vm);
+
     ret = 0;
 
  endjob:
@@ -664,6 +672,8 @@ chDomainSuspend(virDomainPtr dom)
     }
 
     virDomainObjSetState(vm, VIR_DOMAIN_PAUSED, VIR_DOMAIN_PAUSED_USER);
+
+    virCHDomainSaveStatus(vm);
 
     ret = 0;
 
@@ -710,6 +720,8 @@ chDomainResume(virDomainPtr dom)
 
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_UNPAUSED);
 
+    virCHDomainSaveStatus(vm);
+
     ret = 0;
 
  endjob:
@@ -736,6 +748,7 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
     virDomainObj *vm;
     virObjectEvent *event = NULL;
     unsigned int stopFlags = 0;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret = -1;
 
     virCheckFlags(VIR_DOMAIN_DESTROY_GRACEFUL, -1);
@@ -757,6 +770,12 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
 
     if (virCHProcessStop(driver, vm,
                          VIR_DOMAIN_SHUTOFF_DESTROYED, stopFlags) < 0) {
+        goto endjob;
+    }
+
+    virDomainObjRemoveTransientDef(vm);
+
+    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
         goto endjob;
     }
 
@@ -1236,6 +1255,9 @@ chDomainRestoreFlags(virConnectPtr conn,
         goto endjob;
     }
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_RESTORED);
+
+    virCHDomainSaveStatus(vm);
+
     ret = 0;
 
  endjob:
