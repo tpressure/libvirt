@@ -346,6 +346,7 @@ chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
     virDomainPtr dom = NULL;
     virObjectEvent *event = NULL;
     g_autofree char *managed_save_path = NULL;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     unsigned int parse_flags = VIR_DOMAIN_DEF_PARSE_INACTIVE;
 
     virCheckFlags(VIR_DOMAIN_DEFINE_VALIDATE, NULL);
@@ -374,14 +375,20 @@ chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
                                    0, &oldDef)))
         goto cleanup;
 
-    /* cleanup if there's any stale managedsave dir */
-    managed_save_path = chDomainManagedSavePath(driver, vm);
-    if (virFileDeleteTree(managed_save_path) < 0) {
-        virReportSystemError(errno,
-                             _("Failed to cleanup stale managed save dir '%1$s'"),
-                             managed_save_path);
-        goto cleanup;
+    /* Only a new inactive domain can have an unrelated stale save image. */
+    if (!oldDef && !virDomainObjIsActive(vm)) {
+        managed_save_path = chDomainManagedSavePath(driver, vm);
+        if (virFileDeleteTree(managed_save_path) < 0) {
+            virReportSystemError(errno,
+                                 _("Failed to cleanup stale managed save dir '%1$s'"),
+                                 managed_save_path);
+            goto cleanup;
+        }
     }
+
+    if (virDomainDefSave(vm->newDef ? vm->newDef : vm->def,
+                         driver->xmlopt, cfg->configDir) < 0)
+        goto cleanup;
 
     vm->persistent = 1;
     event = virDomainEventLifecycleNewFromObj(vm,
@@ -392,6 +399,18 @@ chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
     dom = virGetDomain(conn, vm->def->name, vm->def->uuid, vm->def->id);
 
  cleanup:
+    if (!dom && vm) {
+        if (virDomainObjIsActive(vm)) {
+            virDomainDefFree(vm->newDef);
+            vm->newDef = g_steal_pointer(&oldDef);
+        } else if (oldDef) {
+            virDomainDefFree(vm->def);
+            vm->def = g_steal_pointer(&oldDef);
+        } else {
+            virCHDomainRemoveInactive(driver, vm);
+        }
+    }
+
     virDomainObjEndAPI(&vm);
     virObjectEventStateQueue(driver->domainEventState, event);
 
@@ -412,6 +431,9 @@ chDomainUndefineFlags(virDomainPtr dom,
     virDomainObj *vm;
     virObjectEvent *event = NULL;
     int ret = -1;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
+
+    cfg = virCHDriverGetConfig(driver);
 
     virCheckFlags(0, -1);
 
@@ -421,14 +443,23 @@ chDomainUndefineFlags(virDomainPtr dom,
     if (virDomainUndefineFlagsEnsureACL(dom->conn, vm->def) < 0)
         goto cleanup;
 
+    if (virDomainObjBeginJob(vm, VIR_JOB_MODIFY) < 0)
+        goto cleanup;
+
     if (!vm->persistent) {
         virReportError(VIR_ERR_OPERATION_INVALID,
                        "%s", _("Cannot undefine transient domain"));
-        goto cleanup;
+        goto endjob;
     }
+
+    if (virDomainDeleteConfig(cfg->configDir, cfg->autostartDir, vm) < 0)
+        goto endjob;
+
     event = virDomainEventLifecycleNewFromObj(vm,
                                               VIR_DOMAIN_EVENT_UNDEFINED,
                                               VIR_DOMAIN_EVENT_UNDEFINED_REMOVED);
+
+    VIR_DEBUG("Undefining domain '%s'", vm->def->name);
 
     vm->persistent = 0;
     if (!virDomainObjIsActive(vm)) {
@@ -436,6 +467,9 @@ chDomainUndefineFlags(virDomainPtr dom,
     }
 
     ret = 0;
+
+ endjob:
+    virDomainObjEndJob(vm);
 
  cleanup:
     virDomainObjEndAPI(&vm);
@@ -465,6 +499,25 @@ static int chDomainIsActive(virDomainPtr dom)
 
  cleanup:
     virDomainObjEndAPI(&vm);
+    return ret;
+}
+
+static int
+chDomainIsPersistent(virDomainPtr dom)
+{
+    virDomainObj *obj;
+    int ret = -1;
+
+    if (!(obj = virCHDomainObjFromDomain(dom)))
+        goto cleanup;
+
+    if (virDomainIsPersistentEnsureACL(dom->conn, obj->def) < 0)
+        goto cleanup;
+
+    ret = obj->persistent;
+
+ cleanup:
+    virDomainObjEndAPI(&obj);
     return ret;
 }
 
@@ -1864,6 +1917,7 @@ chDomainPinVcpuFlags(virDomainPtr dom,
     if (persistentDef) {
         virBitmapFree(vcpuinfo->cpumask);
         vcpuinfo->cpumask = g_steal_pointer(&pcpumap);
+        ret = virDomainDefSave(persistentDef, driver->xmlopt, cfg->configDir);
         goto endjob;
     }
 
@@ -2027,7 +2081,8 @@ chDomainPinEmulator(virDomainPtr dom,
         virBitmapFree(persistentDef->cputune.emulatorpin);
         persistentDef->cputune.emulatorpin = virBitmapNewCopy(pcpumap);
 
-        /* Inactive XMLs are not saved, yet. */
+        ret = virDomainDefSave(persistentDef, driver->xmlopt, cfg->configDir);
+        goto endjob;
     }
 
     ret = 0;
@@ -2288,7 +2343,8 @@ chDomainSetNumaParameters(virDomainPtr dom,
                                  -1, mode, nodeset) < 0)
             goto endjob;
 
-        /* Inactive XMLs are not saved, yet. */
+        if (virDomainDefSave(persistentDef, driver->xmlopt, cfg->configDir) < 0)
+            goto endjob;
     }
 
     ret = 0;
@@ -2554,6 +2610,7 @@ static virHypervisorDriver chHypervisorDriver = {
     .domainGetXMLDesc = chDomainGetXMLDesc,                 /* 7.5.0 */
     .domainGetInfo = chDomainGetInfo,                       /* 7.5.0 */
     .domainIsActive = chDomainIsActive,                     /* 7.5.0 */
+    .domainIsPersistent = chDomainIsPersistent,             /* 12.8.0 */
     .domainOpenConsole = chDomainOpenConsole,               /* 7.8.0 */
     .nodeGetInfo = chNodeGetInfo,                           /* 7.5.0 */
     .domainGetVcpus = chDomainGetVcpus,                     /* 8.0.0 */
