@@ -49,3 +49,5 @@ chProcessAddNetworkDevice(virCHDriver *driver,
                           virDomainNetDef *net,
                           int **nicindexes,
                           size_t *nnicindexes);
+
+int virCHProcessReconnect(virCHDriver *driver, virDomainObj *vm);
