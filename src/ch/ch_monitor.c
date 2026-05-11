@@ -59,7 +59,6 @@ static int virCHMonitorOnceInit(void)
 
 VIR_ONCE_GLOBAL_INIT(virCHMonitor);
 
-int virCHMonitorShutdownVMM(virCHMonitor *mon);
 int virCHMonitorPutNoContent(virCHMonitor *mon, const char *endpoint,
                              domainLogContext *logCtxt);
 static int

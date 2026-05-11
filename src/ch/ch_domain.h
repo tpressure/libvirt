@@ -79,3 +79,6 @@ virCHDomainObjFromDomain(virDomainPtr domain);
 
 int
 virCHDomainValidateActualNetDef(virDomainNetDef *net);
+
+void virCHDomainSaveStatus(virDomainObj *vm);
+void virCHDomainDeleteStatus(virDomainObj *vm);
