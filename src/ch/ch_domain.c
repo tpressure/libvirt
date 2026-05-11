@@ -142,10 +142,50 @@ virCHDomainDefPostParse(virDomainDef *def,
     return 0;
 }
 
+static int
+virCHDomainObjPrivateXMLFormat(virBuffer *buf, virDomainObj *vm)
+{
+    virCHDomainObjPrivate *priv = vm->privateData;
+    g_autofree char *cpuset = NULL;
+    g_autofree char *nodeset = NULL;
+
+    if (priv->autoCpuset) {
+        cpuset = virBitmapFormat(priv->autoCpuset);
+        virBufferAsprintf(buf, "<autoCpuset cpuset='%s'/>\n", cpuset);
+    }
+    if (priv->autoNodeset) {
+        nodeset = virBitmapFormat(priv->autoNodeset);
+        virBufferAsprintf(buf, "<autoNodeset nodeset='%s'/>\n", nodeset);
+    }
+
+    return 0;
+}
+
+
+static int
+virCHDomainObjPrivateXMLParse(xmlXPathContextPtr ctxt,
+                              virDomainObj *vm,
+                              virDomainDefParserConfig *config G_GNUC_UNUSED)
+{
+    virCHDomainObjPrivate *priv = vm->privateData;
+    g_autofree char *cpuset = virXPathString("string(./autoCpuset/@cpuset)", ctxt);
+    g_autofree char *nodeset = virXPathString("string(./autoNodeset/@nodeset)", ctxt);
+
+    if (cpuset && !(priv->autoCpuset = virBitmapParseUnlimited(cpuset)))
+        return -1;
+    if (nodeset && !(priv->autoNodeset = virBitmapParseUnlimited(nodeset)))
+        return -1;
+
+    return 0;
+}
+
+
 virDomainXMLPrivateDataCallbacks virCHDriverPrivateDataCallbacks = {
     .alloc = virCHDomainObjPrivateAlloc,
     .free = virCHDomainObjPrivateFree,
     .vcpuNew = virCHDomainVcpuPrivateNew,
+    .format = virCHDomainObjPrivateXMLFormat,
+    .parse = virCHDomainObjPrivateXMLParse,
 };
 
 static int

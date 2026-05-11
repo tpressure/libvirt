@@ -31,6 +31,7 @@
 #include "ch_events.h"
 #include "ch_interface.h"
 #include "ch_monitor.h"
+#include "ch_process.h"
 #include "domain_interface.h"
 #include "viralloc.h"
 #include "vircommand.h"
@@ -842,6 +843,70 @@ chMonitorCreateSocket(const char *socket_path)
     return -1;
 }
 
+
+virCHMonitor *
+virCHMonitorReattach(virDomainObj *vm,
+                     virCHDriverConfig *cfg)
+{
+    g_autoptr(virCHMonitor) mon = NULL;
+    int event_monitor_fd;
+
+    if (virCHMonitorInitialize() < 0)
+        return NULL;
+
+    if (!(mon = virObjectLockableNew(virCHMonitorClass)))
+        return NULL;
+
+    /* avoid VIR_FORCE_CLOSE()-ing garbage fd value in virCHMonitorClose */
+    mon->eventmonitorfd = -1;
+
+    if (!vm->def) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("VM is not defined"));
+        return NULL;
+    }
+
+    /* Reconnect to the existing Cloud Hypervisor socket. */
+    mon->socketpath = g_strdup_printf("%s/%s-socket", cfg->stateDir, vm->def->name);
+
+    /* Event monitor file to listen for VM state changes */
+    mon->eventmonitorpath = g_strdup_printf("%s/%s-event-monitor-fifo",
+                                            cfg->stateDir, vm->def->name);
+
+    /* open the reader end of fifo before start Event Handler */
+    while ((event_monitor_fd = open(mon->eventmonitorpath, O_RDONLY)) < 0) {
+        if (errno == EINTR) {
+            /* 100 milli seconds */
+            g_usleep(100000);
+            continue;
+        }
+        /* Any other error should be a BUG(kernel/libc/libvirtd)
+         * (ENOMEM can happen on exceeding per-user limits)
+         */
+        virReportSystemError(errno,
+                             _("Failed to open event monitor FIFO '%1$s' for domain '%2$s'"),
+                             mon->eventmonitorpath, vm->def->name);
+        /* CH process(Writer) is blocked at this point as EventHandler(Reader)
+         * fails to open the FIFO.
+         */
+        return NULL;
+    }
+    mon->eventmonitorfd = event_monitor_fd;
+    VIR_DEBUG("%s: Opened the event monitor FIFO(%s)", vm->def->name, mon->eventmonitorpath);
+
+    /* now has its own reference */
+    mon->vm = virObjectRef(vm);
+
+    if (!(mon->handle = curl_easy_init())) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed to initialize CH monitor connection"));
+        return NULL;
+    }
+
+    return g_steal_pointer(&mon);
+}
+
+
 virCHMonitor *
 virCHMonitorNew(virDomainObj *vm, virCHDriverConfig *cfg, int logfile)
 {
@@ -1172,6 +1237,7 @@ virCHMonitorGet(virCHMonitor *mon, const char *endpoint, virJSONValue **response
 
         curl_easy_setopt(mon->handle, CURLOPT_UNIX_SOCKET_PATH, mon->socketpath);
         curl_easy_setopt(mon->handle, CURLOPT_URL, url);
+        curl_easy_setopt(mon->handle, CURLOPT_TIMEOUT_MS, 5000L);
 
         if (response) {
             headers = curl_slist_append(headers, "Accept: application/json");

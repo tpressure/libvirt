@@ -1525,6 +1525,33 @@ static int chStateCleanup(void)
     return 0;
 }
 
+
+static int
+chDomainReattach(virDomainObj *vm,
+                 void *data)
+{
+    virCHDriver *driver = data;
+    int ret = 0;
+
+    virObjectRef(vm);
+    virObjectLock(vm);
+
+    if (virDomainObjIsActive(vm)) {
+        ret = virCHProcessReconnect(driver, vm);
+        if (ret == 1)
+            ret = 0;
+    } else {
+        virCHDomainDeleteStatus(vm);
+    }
+
+    if (!virDomainObjIsActive(vm) && !vm->persistent)
+        virDomainObjListRemoveLocked(driver->domains, vm);
+
+    virDomainObjEndAPI(&vm);
+    return ret;
+}
+
+
 static virDrvStateInitResult
 chStateInitialize(bool privileged,
                   const char *root,
@@ -1534,6 +1561,7 @@ chStateInitialize(bool privileged,
 {
     g_autofree char *driverConf = NULL;
     int ret = VIR_DRV_STATE_INIT_ERROR;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
     int rv;
 
     if (root != NULL) {
@@ -1591,7 +1619,29 @@ chStateInitialize(bool privileged,
 
     ch_driver->chCaps = virCHCapsInitCHVersionCaps(ch_driver->version);
 
+    /* Get all the running persistent or transient configs first */
+    cfg = virCHDriverGetConfig(ch_driver);
+    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                       cfg->stateDir,
+                                       NULL, true,
+                                       ch_driver->xmlopt,
+                                       NULL, NULL) < 0)
+        goto cleanup;
+
+    /* Then inactive persistent configs */
+    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                       cfg->configDir,
+                                       cfg->autostartDir, false,
+                                       ch_driver->xmlopt,
+                                       NULL, NULL) < 0)
+        goto cleanup;
+
     ch_driver->privileged = privileged;
+
+    if (virDomainObjListForEach(ch_driver->domains, true,
+                                chDomainReattach, ch_driver) < 0)
+        goto cleanup;
+
     ret = VIR_DRV_STATE_INIT_COMPLETE;
 
  cleanup:
