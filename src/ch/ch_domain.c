@@ -423,3 +423,29 @@ virCHDomainValidateActualNetDef(virDomainNetDef *net)
 
     return 0;
 }
+
+
+void
+virCHDomainSaveStatus(virDomainObj *vm)
+{
+    virCHDriver *driver = CH_DOMAIN_PRIVATE(vm)->driver;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
+
+    if (!virDomainObjIsActive(vm))
+        return;
+
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+}
+
+
+void
+virCHDomainDeleteStatus(virDomainObj *vm)
+{
+    virCHDriver *driver = CH_DOMAIN_PRIVATE(vm)->driver;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
+    g_autofree char *path = virDomainConfigFile(cfg->stateDir, vm->def->name);
+
+    if (unlink(path) < 0 && errno != ENOENT)
+        VIR_DEBUG("Failed to remove domain status %s: %s", path, g_strerror(errno));
+}
