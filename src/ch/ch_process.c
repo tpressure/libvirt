@@ -508,7 +508,7 @@ virCHProcessSetup(virDomainObj *vm)
  *
  * Returns socket fd on success, -1 on error
  */
-static int
+int
 chMonitorSocketConnect(virCHMonitor *mon)
 {
     struct sockaddr_un server_addr = { };
@@ -775,6 +775,14 @@ virCHRestoreCreateNetworkDevices(virCHDriver *driver,
     size_t index_vmtapfds;
     for (i = 0; i < vmdef->nnets; i++) {
         g_autofree int *tapfds = NULL;
+
+        // This is set to 0 in domain_conf.c always.
+        if (vmdef->nets[i]->driver.virtio.queues == 0) {
+            /* "queues" here refers to queue pairs. When 0, initialize
+             * queue pairs to 1.
+             */
+            vmdef->nets[i]->driver.virtio.queues = 1;
+        }
         tapfd_len = vmdef->nets[i]->driver.virtio.queues;
         if (virCHDomainValidateActualNetDef(vmdef->nets[i]) < 0) {
             virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
@@ -1146,6 +1154,13 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
         return -1;
     }
     logfile = domainLogContextGetWriteFD(logCtxt);
+
+    if (virCHProcessPrepareDomain(vm) < 0) {
+        return -1;
+    }
+
+    if (virCHProcessPrepareHost(driver, vm) < 0)
+        return -1;
 
     if (!priv->monitor) {
         /* Get the first monitor connection if not already */

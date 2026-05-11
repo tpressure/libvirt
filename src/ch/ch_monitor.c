@@ -57,6 +57,9 @@ static int virCHMonitorOnceInit(void)
     return 0;
 }
 
+static int
+chMonitorSocketConnect(virCHMonitor *mon);
+
 VIR_ONCE_GLOBAL_INIT(virCHMonitor);
 
 int virCHMonitorShutdownVMM(virCHMonitor *mon);
@@ -673,6 +676,76 @@ chMonitorCreateSocket(const char *socket_path)
  error:
     VIR_FORCE_CLOSE(fd);
     return -1;
+}
+
+virCHMonitor *
+virCHMonitorReattach(virDomainObj *vm, virCHDriverConfig *cfg)
+{
+    g_autoptr(virCHMonitor) mon = NULL;
+    g_autoptr(virCommand) cmd = NULL;
+    int socket_fd = 0;
+    int event_monitor_fd;
+
+    if (virCHMonitorInitialize() < 0)
+        return NULL;
+
+    if (!(mon = virObjectLockableNew(virCHMonitorClass)))
+        return NULL;
+
+    /* avoid VIR_FORCE_CLOSE()-ing garbage fd value in virCHMonitorClose */
+    mon->eventmonitorfd = -1;
+
+    if (!vm->def) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("VM is not defined"));
+        return NULL;
+    }
+
+    /* prepare to launch Cloud-Hypervisor socket */
+    mon->socketpath = g_strdup_printf("%s/%s-socket", cfg->stateDir, vm->def->name);
+
+    /* Event monitor file to listen for VM state changes */
+    mon->eventmonitorpath = g_strdup_printf("%s/%s-event-monitor-fifo",
+                                            cfg->stateDir, vm->def->name);
+
+    socket_fd = chMonitorSocketConnect(mon);
+    if (socket_fd < 0) {
+        virReportSystemError(errno,
+                             _("Cannot create socket '%1$s'"),
+                             mon->socketpath);
+        return NULL;
+    }
+
+    /* open the reader end of fifo before start Event Handler */
+    while ((event_monitor_fd = open(mon->eventmonitorpath, O_RDONLY)) < 0) {
+        if (errno == EINTR) {
+            /* 100 milli seconds */
+            g_usleep(100000);
+            continue;
+        }
+        /* Any other error should be a BUG(kernel/libc/libvirtd)
+         * (ENOMEM can happen on exceeding per-user limits)
+         */
+        VIR_ERROR(_("%1$s: Failed to open the event monitor FIFO(%2$s) read end!"),
+                  vm->def->name, mon->eventmonitorpath);
+        /* CH process(Writer) is blocked at this point as EventHandler(Reader)
+         * fails to open the FIFO.
+         */
+        return NULL;
+    }
+    mon->eventmonitorfd = event_monitor_fd;
+    VIR_DEBUG("%s: Opened the event monitor FIFO(%s)", vm->def->name, mon->eventmonitorpath);
+
+    /* now has its own reference */
+    mon->vm = virObjectRef(vm);
+
+    if (virCHStartEventHandler(mon) < 0)
+        return NULL;
+
+    /* get a curl handle */
+    mon->handle = curl_easy_init();
+
+    return g_steal_pointer(&mon);
 }
 
 virCHMonitor *

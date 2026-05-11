@@ -1552,6 +1552,20 @@ static int chStateCleanup(void)
     return 0;
 }
 
+static int
+chDomainReattach(virDomainObj *vm, void *data)
+{
+    virCHDriver *driver = data;
+    virCHDomainObjPrivate *priv = vm->privateData;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
+    virDomainState state = virDomainObjGetState(vm, NULL);
+
+    if (state == VIR_DOMAIN_RUNNING || state == VIR_DOMAIN_PAUSED)
+        priv->monitor = virCHMonitorReattach(vm, cfg);
+
+    return 0;
+}
+
 static virDrvStateInitResult
 chStateInitialize(bool privileged,
                   const char *root,
@@ -1561,6 +1575,7 @@ chStateInitialize(bool privileged,
 {
     g_autofree char *driverConf = NULL;
     int ret = VIR_DRV_STATE_INIT_ERROR;
+    g_autoptr(virCHDriverConfig) cfg = NULL;
     int rv;
 
     if (root != NULL) {
@@ -1601,15 +1616,6 @@ chStateInitialize(bool privileged,
     if (virCHDriverConfigLoadFile(ch_driver->config, driverConf) < 0)
         goto cleanup;
 
-    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
-                                       ch_driver->config->configDir,
-                                       NULL,
-                                       false,
-                                       ch_driver->xmlopt,
-                                       NULL,
-                                       NULL) < 0)
-        goto cleanup;
-
     if (!(ch_driver->hostdevMgr = virHostdevManagerGetDefault()))
         goto cleanup;
 
@@ -1624,7 +1630,30 @@ chStateInitialize(bool privileged,
 
     ch_driver->chCaps = virCHCapsInitCHVersionCaps(ch_driver->version);
 
+    /* Get all the running persistent or transient configs first */
+    cfg = virCHDriverGetConfig(ch_driver);
+    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                       cfg->stateDir,
+                                       NULL, true,
+                                       ch_driver->xmlopt,
+                                       NULL, NULL) < 0)
+        goto cleanup;
+
+    /* Then inactive persistent configs */
+    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                       cfg->configDir,
+                                       cfg->autostartDir, false,
+                                       ch_driver->xmlopt,
+                                       NULL, NULL) < 0)
+        goto cleanup;
+
     ch_driver->privileged = privileged;
+
+    virDomainObjListForEach(ch_driver->domains,
+                            true,
+                            chDomainReattach,
+                            ch_driver);
+
     ret = VIR_DRV_STATE_INIT_COMPLETE;
 
  cleanup:
