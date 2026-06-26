@@ -976,8 +976,11 @@ virCHProcessStart(virCHDriver *driver,
         return -1;
     }
 
+    virInhibitorHold(driver->inhibitor);
+    priv->inhibitorHeld = true;
+
     if (virCHProcessPrepareHost(driver, vm) < 0)
-        return -1;
+        goto cleanup;
 
     if (!priv->monitor) {
         /* And we can get the first monitor connection now too */
@@ -1019,7 +1022,7 @@ virCHProcessStart(virCHDriver *driver,
 
     /* Bring up netdevs before starting CPUs */
     if (virDomainInterfaceStartDevices(vm->def) < 0)
-        return -1;
+        goto cleanup;
 
     if (virCHMonitorBootVM(priv->monitor, logCtxt) < 0) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
@@ -1071,6 +1074,12 @@ virCHProcessStop(virCHDriver *driver,
 
         virProcessKillPainfully(vm->pid, force);
         g_clear_pointer(&priv->monitor, virCHMonitorClose);
+    }
+
+    /* Allow virtchd to shut down once no running domains remain. */
+    if (priv->inhibitorHeld) {
+        virInhibitorRelease(driver->inhibitor);
+        priv->inhibitorHeld = false;
     }
 
     /* de-activate netdevs after stopping vm */
@@ -1161,8 +1170,11 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
     if (virCHProcessPrepareDomain(vm) < 0)
         return -1;
 
+    virInhibitorHold(driver->inhibitor);
+    priv->inhibitorHeld = true;
+
     if (virCHProcessPrepareHost(driver, vm) < 0)
-        return -1;
+        goto cleanup;
 
     if (!priv->monitor) {
         /* Get the first monitor connection if not already */
@@ -1325,6 +1337,8 @@ virCHProcessReconnect(virCHDriver *driver, virDomainObj *vm)
     if (virCHStartEventHandler(priv->monitor) < 0)
         return -1;
 
+    virInhibitorHold(driver->inhibitor);
+    priv->inhibitorHeld = true;
     virCHDomainSaveStatus(vm);
     return 0;
 }
