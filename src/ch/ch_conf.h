@@ -26,6 +26,7 @@
 #include "ch_capabilities.h"
 #include "virebtables.h"
 #include "object_event.h"
+#include "virinhibitor.h"
 
 #define CH_DRIVER_NAME "CH"
 #define CH_CMD "cloud-hypervisor"
@@ -109,6 +110,10 @@ struct _virCHDriver
 
     /* Immutable pointer, self-locking APIs */
     virObjectEventState *domainEventState;
+
+    // The inhibitor prevents the virtchd daemon to shutdown if there are
+    // running VMs.
+    virInhibitor *inhibitor;
 };
 
 #define CH_SAVE_MAGIC "libvirt-xml\n \0 \r"

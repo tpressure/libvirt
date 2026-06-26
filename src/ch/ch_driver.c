@@ -35,6 +35,7 @@
 #include "viraccessapicheck.h"
 #include "virchrdev.h"
 #include "virerror.h"
+#include "virinhibitor.h"
 #include "virlog.h"
 #include "virobject.h"
 #include "virfile.h"
@@ -1546,6 +1547,7 @@ static int chStateCleanup(void)
     virObjectUnref(ch_driver->domains);
     virObjectUnref(ch_driver->hostdevMgr);
     virObjectUnref(ch_driver->domainEventState);
+    virInhibitorFree(ch_driver->inhibitor);
     virMutexDestroy(&ch_driver->lock);
     g_clear_pointer(&ch_driver, g_free);
 
@@ -1621,6 +1623,14 @@ chStateInitialize(bool privileged,
 
     if (!(ch_driver->domainEventState = virObjectEventStateNew()))
         goto cleanup;
+
+    ch_driver->inhibitor = virInhibitorNew(
+        VIR_INHIBITOR_WHAT_SHUTDOWN,
+        _("Libvirt CHV"),
+        _("CHV virtual machines are running"),
+        VIR_INHIBITOR_MODE_DELAY,
+        callback,
+        opaque);
 
     if ((rv = chExtractVersion(ch_driver)) < 0) {
         if (rv == -2)
