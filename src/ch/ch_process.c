@@ -1034,6 +1034,8 @@ virCHProcessStart(virCHDriver *driver,
         goto cleanup;
 
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, reason);
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        goto cleanup;
 
     return 0;
 
@@ -1237,6 +1239,8 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
         goto cleanup;
 
     virDomainObjSetState(vm, VIR_DOMAIN_PAUSED, VIR_DOMAIN_PAUSED_FROM_SNAPSHOT);
+    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
+        goto cleanup;
     ret = 0;
 
  cleanup:
