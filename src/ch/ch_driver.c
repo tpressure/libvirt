@@ -212,7 +212,6 @@ chDomainCreateXML(virConnectPtr conn,
     virDomainPtr dom = NULL;
     unsigned int parse_flags = VIR_DOMAIN_DEF_PARSE_INACTIVE;
     g_autofree char *managed_save_path = NULL;
-    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
 
     virCheckFlags(VIR_DOMAIN_START_VALIDATE, NULL);
 
@@ -255,9 +254,6 @@ chDomainCreateXML(virConnectPtr conn,
     if (virCHProcessStart(driver, vm, VIR_DOMAIN_RUNNING_BOOTED) < 0)
         goto endjob;
 
-    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
-        VIR_WARN("Failed to save status on vm %s", vm->def->name);
-
     dom = virGetDomain(conn, vm->def->name, vm->def->uuid, vm->def->id);
 
  endjob:
@@ -278,7 +274,6 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
     virDomainObj *vm;
     virCHDomainObjPrivate *priv;
     g_autofree char *managed_save_path = NULL;
-    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret = -1;
 
     virCheckFlags(0, -1);
@@ -306,6 +301,7 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
             goto endjob;
         }
         virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_RESTORED);
+        virCHDomainSaveStatus(vm);
         /* cleanup the save dir after restore */
         if (virFileDeleteTree(managed_save_path) < 0) {
             virReportSystemError(errno,
@@ -327,9 +323,6 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
                                                   VIR_DOMAIN_EVENT_STARTED_BOOTED);
         virObjectEventStateQueue(driver->domainEventState, event);
     }
-
-    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
-        VIR_WARN("Failed to save status on vm %s", vm->def->name);
 
  endjob:
     virDomainObjEndJob(vm);
@@ -595,8 +588,6 @@ chDomainShutdown(virDomainPtr dom)
 static int
 chDomainReboot(virDomainPtr dom, unsigned int flags)
 {
-    virCHDriver *driver = dom->conn->privateData;
-    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     virCHDomainObjPrivate *priv;
     virDomainObj *vm;
     virDomainState state;
@@ -636,8 +627,7 @@ chDomainReboot(virDomainPtr dom, unsigned int flags)
     else
         virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_UNPAUSED);
 
-    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
-        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    virCHDomainSaveStatus(vm);
 
     ret = 0;
 
@@ -652,8 +642,6 @@ chDomainReboot(virDomainPtr dom, unsigned int flags)
 static int
 chDomainSuspend(virDomainPtr dom)
 {
-    virCHDriver *driver = dom->conn->privateData;
-    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     virCHDomainObjPrivate *priv;
     virDomainObj *vm;
     int ret = -1;
@@ -686,8 +674,7 @@ chDomainSuspend(virDomainPtr dom)
 
     virDomainObjSetState(vm, VIR_DOMAIN_PAUSED, VIR_DOMAIN_PAUSED_USER);
 
-    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
-        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    virCHDomainSaveStatus(vm);
 
     ret = 0;
 
@@ -702,8 +689,6 @@ chDomainSuspend(virDomainPtr dom)
 static int
 chDomainResume(virDomainPtr dom)
 {
-    virCHDriver *driver = dom->conn->privateData;
-    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     virCHDomainObjPrivate *priv;
     virDomainObj *vm;
     int ret = -1;
@@ -736,8 +721,7 @@ chDomainResume(virDomainPtr dom)
 
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_UNPAUSED);
 
-    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
-        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    virCHDomainSaveStatus(vm);
 
     ret = 0;
 
@@ -1234,7 +1218,6 @@ chDomainRestoreFlags(virConnectPtr conn,
     virDomainObj *vm = NULL;
     virCHDomainObjPrivate *priv;
     g_autoptr(virDomainDef) def = NULL;
-    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret = -1;
 
     virCheckFlags(0, -1);
@@ -1274,8 +1257,7 @@ chDomainRestoreFlags(virConnectPtr conn,
     }
     virDomainObjSetState(vm, VIR_DOMAIN_RUNNING, VIR_DOMAIN_RUNNING_RESTORED);
 
-    if (virDomainObjSave(vm, driver->xmlopt, cfg->stateDir) < 0)
-        VIR_WARN("Failed to save status on vm %s", vm->def->name);
+    virCHDomainSaveStatus(vm);
 
     ret = 0;
 
