@@ -527,6 +527,7 @@ static int chDomainIsPersistent(virDomainPtr dom)
     return ret;
 }
 
+
 static int
 chDomainShutdownFlags(virDomainPtr dom,
                       unsigned int flags)
@@ -2587,6 +2588,7 @@ chDomainAttachDevice(virDomainPtr dom,
     return chDomainAttachDeviceFlags(dom, xml, VIR_DOMAIN_AFFECT_LIVE);
 }
 
+
 static int
 chDomainDetachDeviceFlags(virDomainPtr dom,
                           const char *xml,
@@ -2647,7 +2649,6 @@ chConnectDomainEventRegister(virConnectPtr conn,
     return 0;
 }
 
-
 static int
 chConnectDomainEventDeregister(virConnectPtr conn,
                                virConnectDomainEventCallback callback)
@@ -2665,6 +2666,29 @@ chConnectDomainEventDeregister(virConnectPtr conn,
     return 0;
 }
 
+static int
+chStateShutdownPrepare(void)
+{
+    return 0;
+}
+
+static int
+chStateShutdownWait(void)
+{
+    return 0;
+}
+
+static int
+chStateReload(void)
+{
+    return 0;
+}
+
+static int
+chStateStop(void)
+{
+    return 0;
+}
 
 /* Function Tables */
 static virHypervisorDriver chHypervisorDriver = {
@@ -2746,6 +2770,10 @@ static virStateDriver chStateDriver = {
     .name = "cloud-hypervisor",
     .stateInitialize = chStateInitialize,
     .stateCleanup = chStateCleanup,
+    .stateReload = chStateReload,
+    .stateStop = chStateStop,
+    .stateShutdownPrepare = chStateShutdownPrepare,
+    .stateShutdownWait = chStateShutdownWait,
 };
 
 int chRegister(void)
