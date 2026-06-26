@@ -37,6 +37,7 @@ struct _virCHDomainObjPrivate {
     virBitmap *autoNodeset;
     virCgroup *cgroup;
     char *pidfile;
+    bool inhibitorHeld;
 };
 
 #define CH_DOMAIN_PRIVATE(vm) \
