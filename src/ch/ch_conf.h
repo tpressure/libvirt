@@ -51,6 +51,7 @@ struct _virCHDriverConfig {
     GObject parent;
 
     char *stateDir;
+    char *configBaseDir;
     char *configDir;
     char *logDir;
     char *saveDir;

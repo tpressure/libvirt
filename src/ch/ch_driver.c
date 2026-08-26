@@ -336,11 +336,14 @@ chDomainCreate(virDomainPtr dom)
 }
 
 static virDomainPtr
-chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
+chDomainDefineXMLFlags(virConnectPtr conn,
+                       const char *xml,
+                       unsigned int flags)
 {
     virCHDriver *driver = conn->privateData;
     g_autoptr(virDomainDef) vmdef = NULL;
     g_autoptr(virDomainDef) oldDef = NULL;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     virDomainObj *vm = NULL;
     virDomainPtr dom = NULL;
     virObjectEvent *event = NULL;
@@ -382,15 +385,34 @@ chDomainDefineXMLFlags(virConnectPtr conn, const char *xml, unsigned int flags)
         goto cleanup;
     }
 
+    if (virDomainDefSave(vm->newDef ? vm->newDef : vm->def,
+                         driver->xmlopt,
+                         cfg->configDir) < 0)
+        goto cleanup;
+
     vm->persistent = 1;
+
     event = virDomainEventLifecycleNewFromObj(vm,
                                               VIR_DOMAIN_EVENT_DEFINED,
                                               !oldDef ?
                                               VIR_DOMAIN_EVENT_DEFINED_ADDED :
                                               VIR_DOMAIN_EVENT_DEFINED_UPDATED);
+
     dom = virGetDomain(conn, vm->def->name, vm->def->uuid, vm->def->id);
 
  cleanup:
+    if (!dom && !vmdef) {
+        if (oldDef) {
+            if (virDomainObjIsActive(vm))
+                vm->newDef = oldDef;
+            else
+                vm->def = oldDef;
+            oldDef = NULL;
+        } else {
+            virCHDomainRemoveInactive(driver, vm);
+        }
+    }
+
     virDomainObjEndAPI(&vm);
     virObjectEventStateQueue(driver->domainEventState, event);
 
@@ -408,6 +430,7 @@ chDomainUndefineFlags(virDomainPtr dom,
                       unsigned int flags)
 {
     virCHDriver *driver = dom->conn->privateData;
+    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     virDomainObj *vm;
     virObjectEvent *event = NULL;
     int ret = -1;
@@ -425,14 +448,18 @@ chDomainUndefineFlags(virDomainPtr dom,
                        "%s", _("Cannot undefine transient domain"));
         goto cleanup;
     }
+
+    if (virDomainDeleteConfig(cfg->configDir, NULL, vm) < 0)
+        goto cleanup;
+
     event = virDomainEventLifecycleNewFromObj(vm,
                                               VIR_DOMAIN_EVENT_UNDEFINED,
                                               VIR_DOMAIN_EVENT_UNDEFINED_REMOVED);
 
     vm->persistent = 0;
-    if (!virDomainObjIsActive(vm)) {
+
+    if (!virDomainObjIsActive(vm))
         virCHDomainRemoveInactive(driver, vm);
-    }
 
     ret = 0;
 
@@ -461,6 +488,24 @@ static int chDomainIsActive(virDomainPtr dom)
         goto cleanup;
 
     ret = virDomainObjIsActive(vm);
+
+ cleanup:
+    virDomainObjEndAPI(&vm);
+    return ret;
+}
+
+static int chDomainIsPersistent(virDomainPtr dom)
+{
+    virDomainObj *vm;
+    int ret = -1;
+
+    if (!(vm = virCHDomainObjFromDomain(dom)))
+        goto cleanup;
+
+    if (virDomainIsPersistentEnsureACL(dom->conn, vm->def) < 0)
+        goto cleanup;
+
+    ret = vm->persistent;
 
  cleanup:
     virDomainObjEndAPI(&vm);
@@ -1493,9 +1538,18 @@ chStateInitialize(bool privileged,
     if (!(ch_driver->config = virCHDriverConfigNew(privileged)))
         goto cleanup;
 
-    driverConf = g_strdup_printf("%s/ch.conf", ch_driver->config->configDir);
+    driverConf = g_strdup_printf("%s/ch.conf", ch_driver->config->configBaseDir);
 
     if (virCHDriverConfigLoadFile(ch_driver->config, driverConf) < 0)
+        goto cleanup;
+
+    if (virDomainObjListLoadAllConfigs(ch_driver->domains,
+                                       ch_driver->config->configDir,
+                                       NULL,
+                                       false,
+                                       ch_driver->xmlopt,
+                                       NULL,
+                                       NULL) < 0)
         goto cleanup;
 
     if (!(ch_driver->hostdevMgr = virHostdevManagerGetDefault()))
@@ -2550,6 +2604,7 @@ static virHypervisorDriver chHypervisorDriver = {
     .domainGetXMLDesc = chDomainGetXMLDesc,                 /* 7.5.0 */
     .domainGetInfo = chDomainGetInfo,                       /* 7.5.0 */
     .domainIsActive = chDomainIsActive,                     /* 7.5.0 */
+    .domainIsPersistent = chDomainIsPersistent,             /* 12.7.0 */
     .domainOpenConsole = chDomainOpenConsole,               /* 7.8.0 */
     .nodeGetInfo = chNodeGetInfo,                           /* 7.5.0 */
     .domainGetVcpus = chDomainGetVcpus,                     /* 8.0.0 */
