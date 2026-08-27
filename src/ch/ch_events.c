@@ -51,22 +51,6 @@ VIR_ENUM_IMPL(virCHEvent,
               "vm:restored",
 );
 
-static int
-virCHEventStopProcess(virDomainObj *vm,
-                      virDomainShutoffReason reason)
-{
-    virCHDriver *driver = CH_DOMAIN_PRIVATE(vm)->driver;
-    VIR_LOCK_GUARD lock = virObjectLockGuard(vm);
-
-    if (virDomainObjBeginJob(vm, VIR_JOB_DESTROY))
-        return -1;
-    virCHProcessStop(driver, vm, reason, VIR_CH_PROCESS_STOP_FORCE);
-    virDomainObjEndJob(vm);
-
-    return 0;
-}
-
-
 static void
 virCHProcessEmitEvent(virDomainObj *vm,
                       virCHEvent ev)
@@ -129,6 +113,11 @@ virCHProcessEvent(virCHMonitor *mon,
     g_autofree char *full_event = NULL;
     virDomainObj *vm = mon->vm;
     int ret = 0;
+    VIR_LOCK_GUARD lock = virObjectLockGuard(vm);
+
+    if (CH_DOMAIN_PRIVATE(vm)->monitor != mon ||
+        g_atomic_int_get(&mon->event_handler_stop))
+        return 0;
 
     if (virJSONValueObjectHasKey(eventJSON, "source") == 0) {
         VIR_WARN("%s: Invalid JSON from monitor, no source key", vm->def->name);
@@ -143,6 +132,14 @@ virCHProcessEvent(virCHMonitor *mon,
     full_event = g_strdup_printf("%s:%s", source, event);
     ev = virCHEventTypeFromString(full_event);
     VIR_DEBUG("%s: Source: %s, Event: %s, ev: %d", vm->def->name, source, event, ev);
+
+    if (virDomainObjBeginJob(vm, VIR_JOB_MODIFY) < 0)
+        return -1;
+
+    /* Beginning a job may drop the lock while a destroy/start completes. */
+    if (CH_DOMAIN_PRIVATE(vm)->monitor != mon ||
+        g_atomic_int_get(&mon->event_handler_stop))
+        goto endjob;
 
     virCHProcessEmitEvent(vm, ev);
 
@@ -163,22 +160,24 @@ virCHProcessEvent(virCHMonitor *mon,
         break;
     case VIR_CH_EVENT_VMM_SHUTDOWN:
     case VIR_CH_EVENT_VM_SHUTDOWN:
-        if (virCHEventStopProcess(vm, VIR_DOMAIN_SHUTOFF_SHUTDOWN)) {
+        if (virCHProcessStop(CH_DOMAIN_PRIVATE(vm)->driver, vm,
+                             VIR_DOMAIN_SHUTOFF_SHUTDOWN,
+                             VIR_CH_PROCESS_STOP_FORCE) < 0) {
             VIR_WARN("Failed to mark the VM(%s) as SHUTDOWN!",
                      vm->def->name);
             ret = -1;
         }
         break;
     case VIR_CH_EVENT_VM_REBOOTED:
-        virObjectLock(vm);
         virCHProcessUpdateInfo(vm);
-        virObjectUnlock(vm);
         break;
     case VIR_CH_EVENT_LAST:
     default:
         VIR_WARN("%s: Unknown event: %s", vm->def->name, full_event);
     }
 
+ endjob:
+    virDomainObjEndJob(vm);
     return ret;
 }
 
