@@ -916,6 +916,10 @@ virCHProcessPrepareHost(virCHDriver *driver, virDomainObj *vm)
 static int
 virCHProcessPrepareDomain(virDomainObj *vm)
 {
+    virCHDomainObjPrivate *priv = vm->privateData;
+
+    priv->shutdownDone = false;
+
     if (chAssignDeviceAliases(vm->def) < 0)
         return -1;
 
@@ -968,12 +972,12 @@ virCHProcessStart(virCHDriver *driver,
                                         vm, driver->privileged,
                                         vm->def->name))) {
         virLastErrorPrefixMessage("%s", _("can't connect to virtlogd"));
-        return -1;
+        goto early_cleanup;
     }
     logfile = domainLogContextGetWriteFD(logCtxt);
 
     if (virCHProcessPrepareDomain(vm) < 0) {
-        return -1;
+        goto early_cleanup;
     }
 
     virInhibitorHold(driver->inhibitor);
@@ -1046,7 +1050,12 @@ virCHProcessStart(virCHDriver *driver,
                          VIR_CH_PROCESS_STOP_FORCE);
 
     return ret;
+
+ early_cleanup:
+    virDomainObjRemoveTransientDef(vm);
+    return -1;
 }
+
 
 int
 virCHProcessStop(virCHDriver *driver,
@@ -1066,17 +1075,21 @@ virCHProcessStop(virCHDriver *driver,
     VIR_DEBUG("Stopping VM name=%s pid=%d reason=%d flags=0x%x",
               vm->def->name, (int)vm->pid, (int)reason, flags);
 
+    if (priv->shutdownDone) {
+        VIR_DEBUG("Shutdown already in progress or done");
+        return 0;
+    }
+
     virErrorPreserveLast(&orig_err);
 
-    if (priv->monitor) {
-        bool force = false;
-
-        if (flags & VIR_CH_PROCESS_STOP_FORCE)
-            force = true;
-
-        virProcessKillPainfully(vm->pid, force);
-        g_clear_pointer(&priv->monitor, virCHMonitorClose);
+    if (vm->pid > 0 &&
+        virProcessKillPainfully(vm->pid, flags & VIR_CH_PROCESS_STOP_FORCE) < 0) {
+        virFreeError(orig_err);
+        return -1;
     }
+
+    priv->shutdownDone = true;
+    g_clear_pointer(&priv->monitor, virCHMonitorClose);
 
     /* Allow virtchd to shut down once no running domains remain. */
     if (priv->inhibitorHeld) {
@@ -1123,6 +1136,8 @@ virCHProcessStop(virCHDriver *driver,
                                     hostdev_flags);
 
     virDomainObjRemoveTransientDef(vm);
+
+    virCHDomainDeleteStatus(vm);
     virErrorRestore(&orig_err);
     return 0;
 }
@@ -1165,12 +1180,12 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
                                         vm, driver->privileged,
                                         vm->def->name))) {
         virLastErrorPrefixMessage("%s", _("can't connect to virtlogd"));
-        return -1;
+        goto early_cleanup;
     }
     logfile = domainLogContextGetWriteFD(logCtxt);
 
     if (virCHProcessPrepareDomain(vm) < 0)
-        return -1;
+        goto early_cleanup;
 
     virInhibitorHold(driver->inhibitor);
     priv->inhibitorHeld = true;
@@ -1251,6 +1266,10 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
                          VIR_DOMAIN_SHUTOFF_FAILED,
                          VIR_CH_PROCESS_STOP_FORCE);
     return ret;
+
+ early_cleanup:
+    virDomainObjRemoveTransientDef(vm);
+    return -1;
 }
 
 

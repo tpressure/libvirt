@@ -38,6 +38,8 @@ struct _virCHDomainObjPrivate {
     virCgroup *cgroup;
     char *pidfile;
     bool inhibitorHeld;
+    /* Protected by the domain lock and modification job. */
+    bool shutdownDone;
 };
 
 #define CH_DOMAIN_PRIVATE(vm) \
