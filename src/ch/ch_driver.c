@@ -749,7 +749,6 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
     virDomainObj *vm;
     virObjectEvent *event = NULL;
     unsigned int stopFlags = 0;
-    g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret = -1;
 
     virCheckFlags(VIR_DOMAIN_DESTROY_GRACEFUL, -1);
@@ -771,12 +770,6 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
 
     if (virCHProcessStop(driver, vm,
                          VIR_DOMAIN_SHUTOFF_DESTROYED, stopFlags) < 0) {
-        goto endjob;
-    }
-
-    virDomainObjRemoveTransientDef(vm);
-
-    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
         goto endjob;
     }
 
