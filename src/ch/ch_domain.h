@@ -37,6 +37,11 @@ struct _virCHDomainObjPrivate {
     virBitmap *autoNodeset;
     virCgroup *cgroup;
     char *pidfile;
+    /* Indicates a shutdown for this domain was already done. Used to
+     * synchronize shutdowns triggered via the API and shutdowns triggered by
+     * events.
+     */
+    int shutdown_done;
 };
 
 #define CH_DOMAIN_PRIVATE(vm) \

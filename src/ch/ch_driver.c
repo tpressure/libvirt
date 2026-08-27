@@ -796,12 +796,6 @@ chDomainDestroyFlags(virDomainPtr dom, unsigned int flags)
         goto endjob;
     }
 
-    virDomainObjRemoveTransientDef(vm);
-
-    if (virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm) < 0) {
-        goto endjob;
-    }
-
     event = virDomainEventLifecycleNewFromObj(vm,
                                               VIR_DOMAIN_EVENT_STOPPED,
                                               VIR_DOMAIN_EVENT_STOPPED_DESTROYED);

@@ -916,8 +916,12 @@ virCHProcessPrepareHost(virCHDriver *driver, virDomainObj *vm)
 static int
 virCHProcessPrepareDomain(virDomainObj *vm)
 {
+    virCHDomainObjPrivate *priv = vm->privateData;
+
     if (chAssignDeviceAliases(vm->def) < 0)
         return -1;
+
+    g_atomic_int_set(&priv->shutdown_done, 0);
 
     if (virCHProcessPrepareDomainHostdevs(vm) < 0)
         return -1;
@@ -1047,11 +1051,12 @@ virCHProcessStart(virCHDriver *driver,
     return ret;
 }
 
-int
-virCHProcessStop(virCHDriver *driver,
-                 virDomainObj *vm,
-                 virDomainShutoffReason reason,
-                 unsigned int flags)
+static int
+virCHProcessStopOrKill(virCHDriver *driver,
+                       virDomainObj *vm,
+                       virDomainShutoffReason reason,
+                       unsigned int flags,
+                       bool kill)
 {
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     int ret;
@@ -1065,13 +1070,15 @@ virCHProcessStop(virCHDriver *driver,
     VIR_DEBUG("Stopping VM name=%s pid=%d reason=%d flags=0x%x",
               vm->def->name, (int)vm->pid, (int)reason, flags);
 
+    if (g_atomic_int_exchange(&priv->shutdown_done, 1) == 1) {
+        VIR_DEBUG("Shutdown already in progress or done");
+        return 0;
+    }
+
     virErrorPreserveLast(&orig_err);
 
     if (priv->monitor) {
-        bool force = false;
-
-        if (flags & VIR_CH_PROCESS_STOP_FORCE)
-            force = true;
+        bool force = kill || (flags & VIR_CH_PROCESS_STOP_FORCE);
 
         virProcessKillPainfully(vm->pid, force);
         g_clear_pointer(&priv->monitor, virCHMonitorClose);
@@ -1120,8 +1127,19 @@ virCHProcessStop(virCHDriver *driver,
                                     hostdev_flags);
 
     virDomainObjRemoveTransientDef(vm);
+
+    ignore_value(virDomainDeleteConfig(cfg->stateDir, cfg->autostartDir, vm));
     virErrorRestore(&orig_err);
     return 0;
+}
+
+int
+virCHProcessStop(virCHDriver *driver,
+                 virDomainObj *vm,
+                 virDomainShutoffReason reason,
+                 unsigned int flags)
+{
+    return virCHProcessStopOrKill(driver, vm, reason, flags, false);
 }
 
 /**
