@@ -109,7 +109,12 @@
               ./patches/libvirt/0002-substitute-zfs-and-zpool-commands.patch
             ];
             mesonFlags =
-              (old.mesonFlags or [ ]) ++ lib.optional (commitHash != null) "-Dcommit_hash=${commitHash}";
+              (old.mesonFlags or [ ])
+              # nixpkgs wraps libvirtd during installation. Enable the separate
+              # daemon option only for sources that support it; older releases
+              # build the executable through driver_libvirtd alone.
+              ++ lib.optional (lib.hasInfix "option('libvirtd'," (builtins.readFile "${src}/meson_options.txt")) "-Dlibvirtd=enabled"
+              ++ lib.optional (commitHash != null) "-Dcommit_hash=${commitHash}";
           });
           libvirt-debugoptimized = libvirt.overrideAttrs (_old: {
             mesonBuildType = "debugoptimized";
