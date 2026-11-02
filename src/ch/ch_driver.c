@@ -3856,6 +3856,9 @@ chDomainMigratePrepare3(virConnectPtr dconn,
         }
     }
 
+    if (chMigrationCookieApplyDiskAliases(migration_cookie, def) < 0)
+        goto err_cleanup_port_alloc;
+
     if (!(vm = virDomainObjListAdd(driver->domains, &def,
                                    driver->xmlopt,
                                    VIR_DOMAIN_OBJ_LIST_ADD_LIVE |
@@ -4338,6 +4341,23 @@ chDomainMigratePerform3Impl(virDomainObj *vm,
 
         DBG("Source domain configuration: \n%s\n", source_xml);
         DBG("Target domain configuration: \n%s\n", dom_xml);
+
+        /* Check before contacting the destination, including destinations
+         * which do not yet understand disk aliases in the migration cookie.
+         */
+        {
+            g_autoptr(chMigrationCookie) migration_cookie = chMigrationCookieNew(vm->def);
+            g_autoptr(virDomainDef) targetDef = NULL;
+
+            if (!migration_cookie)
+                goto cleanup;
+
+            if (!(targetDef = chMigrationAnyPrepareDef(driver, dom_xml, NULL)))
+                goto cleanup;
+
+            if (chMigrationCookieApplyDiskAliases(migration_cookie, targetDef) < 0)
+                goto cleanup;
+        }
 
         dconn = virConnectOpenAuth(dconnuri, &virConnectAuthConfig, 0);
 

@@ -68,6 +68,9 @@ test attributes are available. Each attribute can be run via
   - default test suite containing most of the tests
 - `live_migration`
   - live migration tests that usually take longer to run
+- `disk_alias_migration`
+  - focused migration regressions for conflicting and omitted disk aliases,
+    including disk detachment after migration and a virtchd restart
 - `prefault_keepalive`
   - migrates a VM to a Cloud Hypervisor build patched to delay receiver prefaulting
 - `prefault_keepalive_version_migration`

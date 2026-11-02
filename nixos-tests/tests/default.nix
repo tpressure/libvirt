@@ -58,6 +58,11 @@ let
       testScriptFile = ./testsuite_live_migration.py;
     };
 
+    disk_alias_migration = createTestSuite {
+      inherit enablePortForwarding;
+      testScriptFile = ./testsuite_disk_alias_migration.py;
+    };
+
     prefault_keepalive = createTestSuite {
       inherit enablePortForwarding;
       testScriptFile = ./testsuite_prefault_keepalive.py;
