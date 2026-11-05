@@ -126,6 +126,15 @@
                 )
                 (old.mesonFlags or [ ])
               )
+              # These drivers used to be implicit. Nixpkgs disables automatic
+              # features, so explicitly enable their new options when present.
+              ++ map (option: "-D${option}=enabled") (
+                lib.filter (option: lib.hasInfix "option('${option}'," mesonOptions) [
+                  "driver_storage"
+                  "driver_nodedev"
+                  "driver_nwfilter"
+                ]
+              )
               # nixpkgs wraps libvirtd during installation. Enable the separate
               # daemon option only for sources that support it; older releases
               # build the executable through driver_libvirtd alone.
