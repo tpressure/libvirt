@@ -1,0 +1,17 @@
+Subject: [PATCH] meson: apply the install prefix to daemon logrotate files
+
+Upstream commit f739d43ee6 moved daemon logrotate installation into
+src/meson.build. Extend the Nix install-prefix handling to this location
+so installation stays inside the package output instead of writing to /var.
+
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -300,7 +300,7 @@
+   )
+   install_data(
+     daemon_logrotate,
+-    install_dir: sysconfdir / 'logrotate.d',
++    install_dir: install_prefix + sysconfdir / 'logrotate.d',
+     rename: [ daemon['name'] ],
+   )
+ endforeach

@@ -108,7 +108,12 @@
             patches = [
               ./patches/libvirt/0001-meson-patch-in-an-install-prefix-for-building-on-nix.patch
               ./patches/libvirt/0002-substitute-zfs-and-zpool-commands.patch
-            ];
+            ]
+            # Older releases install daemon logrotate files in src/remote,
+            # which is already covered by the install-prefix patch above.
+            ++ lib.optional
+              (lib.hasInfix "daemon_logrotate" (builtins.readFile "${src}/src/meson.build"))
+              ./patches/libvirt/0003-meson-prefix-daemon-logrotate-installation.patch;
             mesonFlags =
               # Upstream renamed driver_secrets to driver_secret. Adapt the
               # nixpkgs flags while retaining support for the previous release.
