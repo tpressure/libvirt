@@ -74,6 +74,10 @@ struct _virCHDriver
 {
     virMutex lock;
 
+    /* Protected by lock; includes workers for domains removed from the list. */
+    virCond eventThreadsCond;
+    size_t eventThreads;
+
     bool privileged;
 
     /* Require lock to get a reference on the object,

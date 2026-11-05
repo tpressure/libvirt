@@ -874,7 +874,7 @@ virCHMonitorReattach(virDomainObj *vm,
                                             cfg->stateDir, vm->def->name);
 
     /* open the reader end of fifo before start Event Handler */
-    while ((event_monitor_fd = open(mon->eventmonitorpath, O_RDONLY)) < 0) {
+    while ((event_monitor_fd = open(mon->eventmonitorpath, O_RDONLY | O_NONBLOCK | O_CLOEXEC)) < 0) {
         if (errno == EINTR) {
             /* 100 milli seconds */
             g_usleep(100000);
@@ -1089,6 +1089,18 @@ void virCHMonitorClose(virCHMonitor *mon)
 
     virObjectUnref(mon);
 }
+
+/* Disconnect the daemon without removing a running VMM's endpoints. */
+void
+virCHMonitorDetach(virCHMonitor *mon)
+{
+    if (!mon)
+        return;
+
+    mon->removePaths = false;
+    virCHMonitorClose(mon);
+}
+
 
 static int
 virCHMonitorCurlPerform(CURL *handle)

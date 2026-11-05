@@ -1501,10 +1501,35 @@ chDomainOpenConsole(virDomainPtr dom,
      return ret;
 }
 
+static int
+chDomainDetach(virDomainObj *vm,
+               void *opaque G_GNUC_UNUSED)
+{
+    virCHDomainObjPrivate *priv = vm->privateData;
+    VIR_LOCK_GUARD lock = virObjectLockGuard(vm);
+
+    g_clear_pointer(&priv->monitor, virCHMonitorDetach);
+    return 0;
+}
+
+
 static int chStateCleanup(void)
 {
     if (ch_driver == NULL)
         return -1;
+
+    if (ch_driver->domains)
+        virDomainObjListForEach(ch_driver->domains, false, chDomainDetach, NULL);
+
+    /* No domain/list locks may be held while workers finish their jobs. */
+    virMutexLock(&ch_driver->lock);
+    while (ch_driver->eventThreads > 0) {
+        if (virCondWait(&ch_driver->eventThreadsCond, &ch_driver->lock) < 0) {
+            virMutexUnlock(&ch_driver->lock);
+            return -1;
+        }
+    }
+    virMutexUnlock(&ch_driver->lock);
 
     virBitmapFree(ch_driver->chCaps);
     virObjectUnref(ch_driver->config);
@@ -1514,6 +1539,7 @@ static int chStateCleanup(void)
     virObjectUnref(ch_driver->hostdevMgr);
     virObjectUnref(ch_driver->domainEventState);
     virInhibitorFree(ch_driver->inhibitor);
+    virCondDestroy(&ch_driver->eventThreadsCond);
     virMutexDestroy(&ch_driver->lock);
     g_clear_pointer(&ch_driver, g_free);
 
@@ -1568,7 +1594,13 @@ chStateInitialize(bool privileged,
     ch_driver = g_new0(virCHDriver, 1);
 
     if (virMutexInit(&ch_driver->lock) < 0) {
-        g_free(ch_driver);
+        g_clear_pointer(&ch_driver, g_free);
+        return VIR_DRV_STATE_INIT_ERROR;
+    }
+
+    if (virCondInit(&ch_driver->eventThreadsCond) < 0) {
+        virMutexDestroy(&ch_driver->lock);
+        g_clear_pointer(&ch_driver, g_free);
         return VIR_DRV_STATE_INIT_ERROR;
     }
 

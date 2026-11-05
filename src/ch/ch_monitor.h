@@ -104,6 +104,8 @@ struct _virCHMonitor {
     int eventmonitorfd;
 
     virThread event_handler_thread;
+    /* Owned by the event worker until it exits. */
+    int event_handler_fd;
     int event_handler_stop;
     struct {
         /* Buffer to hold the data read from pipe */
@@ -125,6 +127,7 @@ virCHMonitorReattach(virDomainObj *vm,
                      virCHDriverConfig *cfg);
 
 void virCHMonitorClose(virCHMonitor *mon);
+void virCHMonitorDetach(virCHMonitor *mon);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(virCHMonitor, virCHMonitorClose);
 
 

@@ -21,6 +21,7 @@
 #include <config.h>
 
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "ch_domain.h"
 #include "ch_events.h"
@@ -28,6 +29,9 @@
 #include "domain_event.h"
 #include "virfile.h"
 #include "virlog.h"
+#include "virutil.h"
+
+#define VIR_FROM_THIS VIR_FROM_CH
 
 VIR_LOG_INIT("ch.ch_events");
 
@@ -276,23 +280,21 @@ virCHReadProcessEvents(virCHMonitor *mon)
     virDomainObj *vm = mon->vm;
     bool incomplete = false;
     size_t sz = 0;
-    int event_monitor_fd = mon->eventmonitorfd;
+    int event_monitor_fd = mon->event_handler_fd;
 
     memset(buf, 0, max_sz);
     do {
         ssize_t ret;
 
+        if (g_atomic_int_get(&mon->event_handler_stop))
+            return 0;
+
         ret = read(event_monitor_fd, buf + sz, max_sz - sz);
-        if (ret == 0 || (ret < 0 && errno == EINTR)) {
-            g_usleep(G_USEC_PER_SEC);
+        if (ret == 0 || (ret < 0 && (errno == EINTR || errno == EAGAIN))) {
+            /* The FIFO is nonblocking so shutdown can stop an idle reader. */
+            g_usleep(100 * 1000);
             continue;
         } else if (ret < 0) {
-            /* We should never reach here. read(2) says possible errors
-             * are EINTR, EAGAIN, EBADF, EFAULT, EINVAL, EIO, EISDIR
-             * We handle EINTR gracefully. There is some serious issue
-             * if we encounter any of the other errors(either in our code
-             * or in the system).
-             */
             VIR_ERROR(_("%1$s: Failed to read ch events!: %2$s"),
                       vm->def->name, g_strerror(errno));
             return -1;
@@ -313,7 +315,8 @@ virCHReadProcessEvents(virCHMonitor *mon)
             incomplete = false;
         sz = mon->event_buffer.buf_fill_sz;
 
-    } while (virDomainObjIsActive(vm) && (sz < max_sz) && incomplete);
+    } while (!g_atomic_int_get(&mon->event_handler_stop) &&
+             (sz < max_sz) && incomplete);
 
     return 0;
 }
@@ -323,6 +326,7 @@ virCHEventHandlerLoop(void *data)
 {
     virCHMonitor *mon = data;
     virDomainObj *vm = NULL;
+    virCHDriver *driver = CH_DOMAIN_PRIVATE(mon->vm)->driver;
 
     /* Obtain a vm reference */
     vm = virObjectRef(mon->vm);
@@ -341,15 +345,38 @@ virCHEventHandlerLoop(void *data)
 
     g_clear_pointer(&mon->event_buffer.buffer, g_free);
     VIR_DEBUG("%s: Event handler loop thread exiting", vm->def->name);
+    VIR_FORCE_CLOSE(mon->event_handler_fd);
     virObjectUnref(vm);
     virObjectUnref(mon);
-    return;
+
+    virMutexLock(&driver->lock);
+    driver->eventThreads--;
+    virCondSignal(&driver->eventThreadsCond);
+    virMutexUnlock(&driver->lock);
 }
 
 int
 virCHStartEventHandler(virCHMonitor *mon)
 {
     g_autofree char *name = NULL;
+    virCHDriver *driver = CH_DOMAIN_PRIVATE(mon->vm)->driver;
+
+    /* Closing the monitor must not close or recycle the worker's descriptor. */
+    if ((mon->event_handler_fd = fcntl(mon->eventmonitorfd, F_DUPFD_CLOEXEC, 0)) < 0) {
+        virReportSystemError(errno, "%s", _("Cannot duplicate event monitor FD"));
+        return -1;
+    }
+    if (virSetNonBlock(mon->event_handler_fd) < 0) {
+        virReportSystemError(errno, "%s", _("Cannot make event monitor FD nonblocking"));
+        VIR_FORCE_CLOSE(mon->event_handler_fd);
+        return -1;
+    }
+
+    g_atomic_int_set(&mon->event_handler_stop, 0);
+    virMutexLock(&driver->lock);
+    driver->eventThreads++;
+    virMutexUnlock(&driver->lock);
+
     name = g_strdup_printf("ch-evt-%d", mon->vm->pid);
 
     virObjectRef(mon);
@@ -359,11 +386,15 @@ virCHStartEventHandler(virCHMonitor *mon)
                             name,
                             false,
                             mon) < 0) {
+        VIR_FORCE_CLOSE(mon->event_handler_fd);
         virObjectUnref(mon);
+        virMutexLock(&driver->lock);
+        driver->eventThreads--;
+        virCondSignal(&driver->eventThreadsCond);
+        virMutexUnlock(&driver->lock);
         return -1;
     }
 
-    g_atomic_int_set(&mon->event_handler_stop, 0);
     return 0;
 }
 
