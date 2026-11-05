@@ -1622,7 +1622,7 @@ chDomainReattach(virDomainObj *vm,
 {
     virCHDriver *driver = data;
     g_autofree char *managedSavePath = NULL;
-    int ret = 0;
+    virCHDomainObjPrivate *priv = vm->privateData;
 
     virObjectRef(vm);
     virObjectLock(vm);
@@ -1631,9 +1631,22 @@ chDomainReattach(virDomainObj *vm,
     vm->hasManagedSave = virFileExists(managedSavePath);
 
     if (virDomainObjIsActive(vm)) {
-        ret = virCHProcessReconnect(driver, vm);
-        if (ret == 1)
-            ret = 0;
+        if (virCHProcessReconnect(driver, vm) < 0) {
+            priv->reconnectError = g_strdup(virGetLastErrorMessage());
+            VIR_WARN("Failed to reconnect domain %s: %s",
+                     vm->def->name, priv->reconnectError);
+            g_clear_pointer(&priv->monitor, virCHMonitorDetach);
+
+            /* The VMM may still be alive. Keep its identity and resources
+             * reserved, and allow other domains to be managed normally.
+             */
+            if (virHostdevUpdateActiveDomainDevices(driver->hostdevMgr, CH_DRIVER_NAME,
+                                                   vm->def, VIR_HOSTDEV_SP_PCI) < 0)
+                VIR_WARN("Failed to reserve host devices for domain %s", vm->def->name);
+            virInhibitorHold(driver->inhibitor);
+            priv->inhibitorHeld = true;
+            virResetLastError();
+        }
     } else {
         virCHDomainDeleteStatus(vm);
     }
@@ -1642,7 +1655,7 @@ chDomainReattach(virDomainObj *vm,
         virDomainObjListRemoveLocked(driver->domains, vm);
 
     virDomainObjEndAPI(&vm);
-    return ret;
+    return 0;
 }
 
 

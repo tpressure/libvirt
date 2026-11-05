@@ -1285,15 +1285,16 @@ virCHProcessReconnect(virCHDriver *driver, virDomainObj *vm)
     g_autoptr(virCHDriverConfig) cfg = virCHDriverGetConfig(driver);
     g_autoptr(virJSONValue) info = NULL;
     g_autofree char *emulator = NULL;
+    g_autofree char *procPath = NULL;
+    g_autofree char *procExe = NULL;
+    g_autofree char *resolvedEmulator = NULL;
     const char *state;
     pid_t pid = -1;
     int rc;
 
     if (vm->pid <= 0 ||
         (virProcessKill(vm->pid, 0) < 0 && errno == ESRCH)) {
-        virCHProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_UNKNOWN,
-                         VIR_CH_PROCESS_STOP_FORCE);
-        return 1;
+        goto stale;
     }
 
     priv->pidfile = virPidFileBuildPath(cfg->stateDir, vm->def->name);
@@ -1303,6 +1304,28 @@ virCHProcessReconnect(virCHDriver *driver, virDomainObj *vm)
                        _("Cannot find emulator '%1$s' for domain '%2$s'"),
                        vm->def->emulator, vm->def->name);
         return -1;
+    }
+
+    /* Check the status PID independently of the PID file. A recycled PID
+     * belongs to another process and must never be killed during cleanup.
+     */
+    procPath = g_strdup_printf("/proc/%lld/exe", (long long)vm->pid);
+    if (!virFileLinkPointsTo(procPath, emulator)) {
+        if (!(procExe = g_file_read_link(procPath, NULL))) {
+            if (virProcessKill(vm->pid, 0) < 0 && errno == ESRCH)
+                goto stale;
+            virReportError(VIR_ERR_OPERATION_FAILED,
+                           _("Cannot verify executable for domain '%1$s'"), vm->def->name);
+            return -1;
+        }
+        if (g_str_has_suffix(procExe, " (deleted)"))
+            procExe[strlen(procExe) - strlen(" (deleted)")] = '\0';
+        if (virFileResolveAllLinks(emulator, &resolvedEmulator) < 0) {
+            virReportSystemError(errno, _("Cannot resolve executable '%1$s'"), emulator);
+            return -1;
+        }
+        if (STRNEQ(procExe, resolvedEmulator))
+            goto stale;
     }
 
     rc = virPidFileReadPath(priv->pidfile, &pid);
@@ -1316,6 +1339,8 @@ virCHProcessReconnect(virCHDriver *driver, virDomainObj *vm)
                        priv->pidfile, emulator);
         return -1;
     }
+    if (pid == -1 && virProcessKill(vm->pid, 0) < 0 && errno == ESRCH)
+        goto stale;
     if (pid != vm->pid) {
         virReportError(VIR_ERR_OPERATION_FAILED,
                        _("PID file does not match running domain '%1$s'"),
@@ -1366,4 +1391,12 @@ virCHProcessReconnect(virCHDriver *driver, virDomainObj *vm)
     priv->inhibitorHeld = true;
     virCHDomainSaveStatus(vm);
     return 0;
+
+ stale:
+    /* Do not signal a PID which is dead or now belongs to another process. */
+    vm->pid = 0;
+    if (virCHProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_UNKNOWN,
+                         VIR_CH_PROCESS_STOP_FORCE) < 0)
+        return -1;
+    return 1;
 }

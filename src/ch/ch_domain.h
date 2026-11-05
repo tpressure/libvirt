@@ -37,6 +37,8 @@ struct _virCHDomainObjPrivate {
     virBitmap *autoNodeset;
     virCgroup *cgroup;
     char *pidfile;
+    /* Keep an unrecovered guest active, but reject operations on it. */
+    char *reconnectError;
     bool inhibitorHeld;
     /* Protected by the domain lock and modification job. */
     bool shutdownDone;

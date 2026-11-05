@@ -69,6 +69,7 @@ virCHDomainObjPrivateFree(void *data)
     virBitmapFree(priv->autoNodeset);
     virCgroupFree(priv->cgroup);
     g_free(priv->pidfile);
+    g_free(priv->reconnectError);
     g_free(priv);
 }
 
@@ -418,6 +419,14 @@ virCHDomainObjFromDomain(virDomainPtr domain)
         virReportError(VIR_ERR_NO_DOMAIN,
                        _("no domain with matching uuid '%1$s' (%2$s)"),
                        uuidstr, domain->name);
+        return NULL;
+    }
+
+    if (CH_DOMAIN_PRIVATE(vm)->reconnectError) {
+        virReportError(VIR_ERR_OPERATION_INVALID,
+                       _("Domain '%1$s' could not be reconnected: %2$s"),
+                       vm->def->name, CH_DOMAIN_PRIVATE(vm)->reconnectError);
+        virDomainObjEndAPI(&vm);
         return NULL;
     }
 
