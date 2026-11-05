@@ -1205,21 +1205,6 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
     vm->def->id = vm->pid;
     priv->machineName = virCHDomainGetMachineName(vm);
 
-    if (virCHMonitorBuildRestoreJson(vm->def, from, &payload) < 0) {
-        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
-                       _("failed to restore domain"));
-        goto cleanup;
-    }
-
-    virBufferAddLit(&http_headers, "PUT /api/v1/vm.restore HTTP/1.1\r\n");
-    virBufferAddLit(&http_headers, "Host: localhost\r\n");
-    virBufferAddLit(&http_headers, "Content-Type: application/json\r\n");
-    virBufferAsprintf(&buf, "%s", virBufferCurrentContent(&http_headers));
-    virBufferAsprintf(&buf, "Content-Length: %zu\r\n\r\n", strlen(payload));
-    virBufferAsprintf(&buf, "%s", payload);
-    payload_len = virBufferUse(&buf);
-    payload = virBufferContentAndReset(&buf);
-
     if ((mon_sockfd = chMonitorSocketConnect(priv->monitor)) < 0)
         goto cleanup;
 
@@ -1239,6 +1224,23 @@ virCHProcessStartRestore(virCHDriver *driver, virDomainObj *vm, const char *from
     /* Bring up netdevs before restoring vm */
     if (virDomainInterfaceStartDevices(vm->def) < 0)
         goto cleanup;
+
+    /* Network creation supplies the default queue counts used by net_fds. */
+    if (virCHMonitorBuildRestoreJson(vm->def, from, &payload) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("failed to restore domain"));
+        goto cleanup;
+    }
+
+    virBufferAddLit(&http_headers, "PUT /api/v1/vm.restore HTTP/1.1\r\n");
+    virBufferAddLit(&http_headers, "Host: localhost\r\n");
+    virBufferAddLit(&http_headers, "Content-Type: application/json\r\n");
+    virBufferAsprintf(&buf, "%s", virBufferCurrentContent(&http_headers));
+    virBufferAsprintf(&buf, "Content-Length: %zu\r\n\r\n", strlen(payload));
+    virBufferAsprintf(&buf, "%s", payload);
+    payload_len = virBufferUse(&buf);
+    g_free(payload);
+    payload = virBufferContentAndReset(&buf);
 
     if (virSocketSendMsgWithFDs(mon_sockfd, payload, payload_len, tapfds, ntapfds) < 0) {
         virReportSystemError(errno, "%s",

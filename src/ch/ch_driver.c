@@ -268,6 +268,12 @@ chDomainCreateXML(virConnectPtr conn,
 }
 
 static int
+chDomainManagedSaveRestore(virConnectPtr conn,
+                           virDomainObj *vm,
+                           const char *path);
+
+
+static int
 chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
 {
     virCHDriver *driver = dom->conn->privateData;
@@ -287,10 +293,15 @@ chDomainCreateWithFlags(virDomainPtr dom, unsigned int flags)
     if (virDomainObjBeginJob(vm, VIR_JOB_MODIFY) < 0)
         goto cleanup;
 
+    if (virDomainObjIsActive(vm)) {
+        virReportError(VIR_ERR_OPERATION_INVALID, "%s", _("VM is already active"));
+        goto endjob;
+    }
+
     if (vm->hasManagedSave) {
         priv = vm->privateData;
         managed_save_path = chDomainManagedSavePath(driver, vm);
-        if (virCHProcessStartRestore(driver, vm, managed_save_path) < 0) {
+        if (chDomainManagedSaveRestore(dom->conn, vm, managed_save_path) < 0) {
             virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
                            _("failed to restore domain from managed save"));
             goto endjob;
@@ -1012,6 +1023,11 @@ static int chDomainSaveImageRead(virConnectPtr conn,
     g_autoptr(virDomainDef) def = NULL;
     g_autofree char *from = NULL;
     g_autofree char *xml = NULL;
+    g_autoptr(xmlDoc) doc = NULL;
+    g_autoptr(xmlXPathContext) ctxt = NULL;
+    g_autofree xmlNodePtr *interfaces = NULL;
+    int ninterfaces;
+    size_t i;
     VIR_AUTOCLOSE fd = -1;
     int ret = -1;
     unsigned int parse_flags = VIR_DOMAIN_DEF_PARSE_INACTIVE |
@@ -1044,8 +1060,26 @@ static int chDomainSaveImageRead(virConnectPtr conn,
             goto end;
     }
 
-    if (!(def = virDomainDefParseString(xml, driver->xmlopt, NULL, parse_flags)))
+    if (!(doc = virXMLParseStringCtxt(xml, _("(CH saved domain)"), &ctxt)))
         goto end;
+    if (!(def = virDomainDefParseNode(ctxt, driver->xmlopt, NULL, parse_flags)))
+        goto end;
+
+    /* Inactive parsing discards generated aliases, but CH requires the
+     * original network IDs when substituting FDs in a saved configuration.
+     */
+    if ((ninterfaces = virXPathNodeSet("./devices/interface", ctxt, &interfaces)) < 0)
+        goto end;
+    if (ninterfaces != def->nnets) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Saved network interfaces do not match the domain definition"));
+        goto end;
+    }
+    for (i = 0; i < def->nnets; i++) {
+        ctxt->node = interfaces[i];
+        g_free(def->nets[i]->info.alias);
+        def->nets[i]->info.alias = virXPathString("string(./alias/@name)", ctxt);
+    }
 
     *ret_def = g_steal_pointer(&def);
     ret = 0;
@@ -1053,6 +1087,41 @@ static int chDomainSaveImageRead(virConnectPtr conn,
  end:
     return ret;
 }
+
+static int
+chDomainManagedSaveRestore(virConnectPtr conn,
+                           virDomainObj *vm,
+                           const char *path)
+{
+    virCHDriver *driver = conn->privateData;
+    g_autoptr(virDomainDef) def = NULL;
+
+    if (chDomainSaveImageRead(conn, path, &def, 0,
+                              virDomainCreateWithFlagsEnsureACL, NULL) < 0)
+        return -1;
+
+    if (memcmp(def->uuid, vm->def->uuid, VIR_UUID_BUFLEN) != 0 ||
+        STRNEQ(def->name, vm->def->name)) {
+        virReportError(VIR_ERR_OPERATION_FAILED, "%s",
+                       _("Managed save image does not match domain"));
+        return -1;
+    }
+
+    if (chDomainSaveRestoreAdditionalValidation(driver, def) < 0)
+        return -1;
+
+    /* Restore the saved live devices, retaining the persistent definition
+     * for the next shutdown. The inactive definition may have changed.
+     */
+    virDomainObjAssignDef(vm, &def, true, NULL);
+    if (virCHProcessStartRestore(driver, vm, path) < 0) {
+        virDomainObjRemoveTransientDef(vm);
+        return -1;
+    }
+
+    return 0;
+}
+
 
 static char *
 chDomainSaveImageGetXMLDesc(virConnectPtr conn,
@@ -1552,10 +1621,14 @@ chDomainReattach(virDomainObj *vm,
                  void *data)
 {
     virCHDriver *driver = data;
+    g_autofree char *managedSavePath = NULL;
     int ret = 0;
 
     virObjectRef(vm);
     virObjectLock(vm);
+
+    managedSavePath = chDomainManagedSavePath(driver, vm);
+    vm->hasManagedSave = virFileExists(managedSavePath);
 
     if (virDomainObjIsActive(vm)) {
         ret = virCHProcessReconnect(driver, vm);
