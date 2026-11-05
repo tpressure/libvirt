@@ -428,7 +428,12 @@ in
           "-Ddriver_libxl=disabled"
           "-Ddriver_lxc=disabled"
           "-Ddriver_openvz=disabled"
-          "-Ddriver_secrets=disabled"
+          (
+            if lib.hasInfix "option('driver_secret'," (builtins.readFile "${old.src}/meson_options.txt") then
+              "-Ddriver_secret=disabled"
+            else
+              "-Ddriver_secrets=disabled"
+          )
           "-Ddriver_vbox=disabled"
           "-Ddriver_vmware=disabled"
           "-Ddriver_vz=disabled"

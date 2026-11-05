@@ -95,6 +95,7 @@
         }:
         let
           mesonBuild = builtins.readFile "${src}/meson.build";
+          mesonOptions = builtins.readFile "${src}/meson_options.txt";
           fallback = builtins.trace "WARN: cannot obtain version from libvirt fork" "0.0.0-unknown";
           # Searches for the line `version: '11.3.0'` and captures the version.
           matches = builtins.match ".*[[:space:]]*version:[[:space:]]'([0-9]+.[0-9]+.[0-9]+)'.*" mesonBuild;
@@ -109,11 +110,21 @@
               ./patches/libvirt/0002-substitute-zfs-and-zpool-commands.patch
             ];
             mesonFlags =
-              (old.mesonFlags or [ ])
+              # Upstream renamed driver_secrets to driver_secret. Adapt the
+              # nixpkgs flags while retaining support for the previous release.
+              (map
+                (flag:
+                  if lib.hasInfix "option('driver_secret'," mesonOptions then
+                    lib.replaceStrings [ "-Ddriver_secrets=" ] [ "-Ddriver_secret=" ] flag
+                  else
+                    flag
+                )
+                (old.mesonFlags or [ ])
+              )
               # nixpkgs wraps libvirtd during installation. Enable the separate
               # daemon option only for sources that support it; older releases
               # build the executable through driver_libvirtd alone.
-              ++ lib.optional (lib.hasInfix "option('libvirtd'," (builtins.readFile "${src}/meson_options.txt")) "-Dlibvirtd=enabled"
+              ++ lib.optional (lib.hasInfix "option('libvirtd'," mesonOptions) "-Dlibvirtd=enabled"
               ++ lib.optional (commitHash != null) "-Dcommit_hash=${commitHash}";
           });
           libvirt-debugoptimized = libvirt.overrideAttrs (_old: {

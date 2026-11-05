@@ -79,7 +79,7 @@ meson setup build \
     -Ddriver_libxl=disabled \
     -Ddriver_lxc=disabled \
     -Ddriver_openvz=disabled \
-    -Ddriver_secrets=disabled \
+    -Ddriver_secret=disabled \
     -Ddriver_vbox=disabled \
     -Ddriver_vmware=disabled \
     -Ddriver_vz=disabled \
