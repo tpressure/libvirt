@@ -96,6 +96,8 @@ struct _virCHMonitor {
 
     CURL *handle;
 
+    /* Remove endpoints only after creating or successfully attaching to them. */
+    bool removePaths;
     char *socketpath;
 
     char *eventmonitorpath;

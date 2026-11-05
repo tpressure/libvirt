@@ -903,6 +903,7 @@ virCHMonitorReattach(virDomainObj *vm,
         return NULL;
     }
 
+    mon->removePaths = true;
     return g_steal_pointer(&mon);
 }
 
@@ -925,6 +926,7 @@ virCHMonitorNew(virDomainObj *vm, virCHDriverConfig *cfg, int logfile)
 
     /* avoid VIR_FORCE_CLOSE()-ing garbage fd value in virCHMonitorClose */
     mon->eventmonitorfd = -1;
+    mon->removePaths = true;
 
     if (!vm->def) {
         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
@@ -1063,7 +1065,8 @@ void virCHMonitorClose(virCHMonitor *mon)
         curl_easy_cleanup(mon->handle);
 
     if (mon->socketpath) {
-        if (virFileRemove(mon->socketpath, -1, -1) < 0 &&
+        if (mon->removePaths &&
+            virFileRemove(mon->socketpath, -1, -1) < 0 &&
             errno != ENOENT) {
             VIR_WARN("Unable to remove CH socket file '%s': %s",
                      mon->socketpath, g_strerror(errno));
@@ -1076,7 +1079,8 @@ void virCHMonitorClose(virCHMonitor *mon)
         VIR_FORCE_CLOSE(mon->eventmonitorfd);
     }
     if (mon->eventmonitorpath) {
-        if (virFileRemove(mon->eventmonitorpath, -1, -1) < 0) {
+        if (mon->removePaths &&
+            virFileRemove(mon->eventmonitorpath, -1, -1) < 0) {
             VIR_WARN("Unable to remove CH event monitor file '%s'",
                      mon->eventmonitorpath);
         }
