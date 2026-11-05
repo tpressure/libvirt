@@ -111,21 +111,17 @@
             ]
             # Older releases install daemon logrotate files in src/remote,
             # which is already covered by the install-prefix patch above.
-            ++ lib.optional
-              (lib.hasInfix "daemon_logrotate" (builtins.readFile "${src}/src/meson.build"))
-              ./patches/libvirt/0003-meson-prefix-daemon-logrotate-installation.patch;
+            ++ lib.optional (lib.hasInfix "daemon_logrotate" (builtins.readFile "${src}/src/meson.build")) ./patches/libvirt/0003-meson-prefix-daemon-logrotate-installation.patch;
             mesonFlags =
               # Upstream renamed driver_secrets to driver_secret. Adapt the
               # nixpkgs flags while retaining support for the previous release.
-              (map
-                (flag:
-                  if lib.hasInfix "option('driver_secret'," mesonOptions then
-                    lib.replaceStrings [ "-Ddriver_secrets=" ] [ "-Ddriver_secret=" ] flag
-                  else
-                    flag
-                )
-                (old.mesonFlags or [ ])
-              )
+              (map (
+                flag:
+                if lib.hasInfix "option('driver_secret'," mesonOptions then
+                  lib.replaceStrings [ "-Ddriver_secrets=" ] [ "-Ddriver_secret=" ] flag
+                else
+                  flag
+              ) (old.mesonFlags or [ ]))
               # These drivers used to be implicit. Nixpkgs disables automatic
               # features, so explicitly enable their new options when present.
               ++ map (option: "-D${option}=enabled") (
