@@ -1237,6 +1237,7 @@ virCHMonitorGet(virCHMonitor *mon, const char *endpoint, virJSONValue **response
 
         curl_easy_setopt(mon->handle, CURLOPT_UNIX_SOCKET_PATH, mon->socketpath);
         curl_easy_setopt(mon->handle, CURLOPT_URL, url);
+        curl_easy_setopt(mon->handle, CURLOPT_TIMEOUT_MS, 5000L);
 
         if (response) {
             headers = curl_slist_append(headers, "Accept: application/json");
